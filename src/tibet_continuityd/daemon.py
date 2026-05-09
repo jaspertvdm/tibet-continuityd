@@ -61,11 +61,15 @@ class DaemonConfig:
     outbox_dir: Optional[Path] = None
     outbox_staging_dir: Optional[Path] = None
     outbox_receiver_aint: str = "self.aint"
+    # v0.3.1 Police stage
+    enable_police: bool = False
+    police_scan_interval_sec: float = 30.0       # how often to scan
+    police_age_alert_threshold_sec: float = 300.0  # lingering bumps WARN
 
     @classmethod
     def from_env(cls) -> "DaemonConfig":
         """Build from environment variables (systemd-friendly)."""
-        return cls(
+        return cls(  # noqa: E1102
             inbox=Path(os.environ.get(
                 "TIBET_CONTINUITYD_INBOX",
                 "/var/lib/tibet/inbox")),
@@ -101,6 +105,13 @@ class DaemonConfig:
             outbox_receiver_aint=os.environ.get(
                 "TIBET_CONTINUITYD_OUTBOX_RECEIVER",
                 "self.aint"),
+            enable_police=os.environ.get(
+                "TIBET_CONTINUITYD_ENABLE_POLICE", "0")
+                in ("1", "true", "yes"),
+            police_scan_interval_sec=float(os.environ.get(
+                "TIBET_CONTINUITYD_POLICE_INTERVAL_SEC", "30")),
+            police_age_alert_threshold_sec=float(os.environ.get(
+                "TIBET_CONTINUITYD_POLICE_AGE_ALERT_SEC", "300")),
         )
 
 
@@ -138,12 +149,32 @@ class ContinuityDaemon:
             "events_forked": 0,
             "events_coalesced": 0,
             "events_sealed": 0,
+            "police_scans": 0,
+            "police_findings": 0,
+            "police_actions": {},
             "by_class": {},
             "by_disposition": {},
         }
         self._actor_id = self._ACTOR_ID_TEMPLATE.format(
             host=socket.gethostname() or "unknown"
         )
+        self._last_police_scan_ts: float = 0.0
+
+        # v0.3.1 Police stage — opt-in. Periodic scan via watcher's
+        # timeout_cb hook (= no extra thread, uses existing timer
+        # tick). Findings emit audit records + apply_action per mode.
+        self._police_scanner = None
+        if cfg.enable_police:
+            from tibet_continuityd.police import PoliceScanner
+            self._police_scanner = PoliceScanner(
+                lane=cfg.inbox,
+                age_alert_threshold_sec=cfg.police_age_alert_threshold_sec,
+            )
+            self.log.info(
+                f"police stage enabled: lane={cfg.inbox}, "
+                f"interval={cfg.police_scan_interval_sec}s, "
+                f"age_alert={cfg.police_age_alert_threshold_sec}s"
+            )
 
         # v0.3.0 Seal stage — opt-in. If enabled, mint an ephemeral
         # signer for this daemon-run. Production deployments should
@@ -415,6 +446,12 @@ class ContinuityDaemon:
                 for settled in coalescer.flush_ready():
                     self._on_arrival(settled)
 
+            def _periodic_tasks() -> None:
+                """Called on every watcher select-timeout. Hosts both
+                the coalesce-flush and the police-scan rhythms."""
+                _flush_settled()
+                self._maybe_run_police_scan()
+
             # stop_cb pattern: watcher checks self._stop on every
             # select-timeout AND after every yielded event, so
             # SIGTERM is honored within ~timeout_sec regardless of
@@ -423,7 +460,7 @@ class ContinuityDaemon:
             for event in watcher.events(
                 timeout_sec=0.1,
                 stop_cb=lambda: self._stop,
-                timeout_cb=_flush_settled,
+                timeout_cb=_periodic_tasks,
             ):
                 if self._stop:
                     break
@@ -437,6 +474,70 @@ class ContinuityDaemon:
 
         self.log.info(f"shutdown stats: {self._stats}")
         return 0
+
+    def _maybe_run_police_scan(self) -> None:
+        """Run a police scan if enabled AND interval-elapsed.
+
+        Per Codex' timeout_cb hook design — no separate thread,
+        rhythm shared with coalesce-flush via watcher's select-
+        timeout.
+        """
+        if self._police_scanner is None:
+            return
+        now = time.time()
+        if now - self._last_police_scan_ts < \
+                self.cfg.police_scan_interval_sec:
+            return
+        self._last_police_scan_ts = now
+
+        from tibet_continuityd.police import apply_action
+
+        try:
+            findings = self._police_scanner.scan()
+        except Exception as e:
+            self.log.warning(f"police scan failed: {e}")
+            return
+
+        if not findings:
+            return
+
+        self._stats["police_scans"] += 1
+        self._stats["police_findings"] += len(findings)
+
+        for finding in findings:
+            try:
+                action = apply_action(
+                    finding,
+                    mode=self.cfg.mode,
+                    quarantine_dir=self.cfg.quarantine_dir,
+                )
+            except Exception as e:
+                self.log.warning(
+                    f"police apply_action failed for "
+                    f"{finding.name!r}: {e}"
+                )
+                continue
+
+            self._stats["police_actions"][action.action] = \
+                self._stats["police_actions"].get(action.action, 0) + 1
+
+            police_record = {
+                "ts": time.time(),
+                "stage": "police",
+                "mode": self.cfg.mode,
+                "actor_id": self._actor_id,
+                "action": action.action,
+                "moved_to": str(action.moved_to)
+                    if action.moved_to else None,
+                "error": action.error,
+                **finding.to_dict(),
+            }
+            self._emit_audit(police_record)
+            self.log.info(
+                f"police: {finding.name!r} → "
+                f"{finding.severity.value}/{action.action} "
+                f"({finding.intake_class})"
+            )
 
 
 def main() -> int:

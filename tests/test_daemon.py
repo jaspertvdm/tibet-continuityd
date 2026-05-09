@@ -149,6 +149,63 @@ def test_daemon_coalesces_multiple_writes_to_same_path(tmp_path):
     assert daemon._stats["events_coalesced"] == 1
 
 
+def test_daemon_police_scan_finds_unpacked_state(tmp_path):
+    """v0.3.1 — daemon's periodic police scan detects existing
+    unpacked state in the inbox lane and emits audit records."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    quarantine = tmp_path / "quarantine"
+
+    # Pre-populate inbox with unpacked state (= what police should find)
+    (inbox / "good.tza").write_bytes(TBZ_MAGIC + b"\x01" + b"\x00" * 50)
+    (inbox / "fake.claude").write_bytes(b"plain text, not sealed")
+    (inbox / "evil").write_bytes(b"\x7fELF" + b"\x00" * 60)
+
+    cfg = DaemonConfig(
+        inbox=inbox,
+        audit_jsonl=tmp_path / "audit.jsonl",
+        mode="strict",
+        log_level="WARNING",
+        enable_police=True,
+        police_scan_interval_sec=0.05,  # quick scans for test
+        quarantine_dir=quarantine,
+    )
+    daemon = ContinuityDaemon(cfg)
+
+    thread = threading.Thread(target=daemon.run, daemon=True)
+    thread.start()
+    time.sleep(0.6)
+    daemon._stop = True
+    thread.join(timeout=2.0)
+
+    # Audit should have police records for all three pre-existing files
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "audit.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    police_records = [r for r in records if r.get("stage") == "police"]
+    assert len(police_records) >= 3
+
+    # Critical evil binary should be quarantined in strict mode
+    evil_records = [r for r in police_records if r["name"] == "evil"]
+    assert len(evil_records) >= 1
+    assert evil_records[0]["severity"] == "critical"
+    assert evil_records[0]["action"] == "quarantine"
+
+    # And actually moved on disk
+    assert not (inbox / "evil").exists()
+    moved_files = list(quarantine.glob("evil*"))
+    assert len(moved_files) >= 1
+
+    # Sealed bundle stays put (INFO severity = observe only)
+    assert (inbox / "good.tza").exists()
+
+    # Stats reflect work done
+    assert daemon._stats["police_scans"] >= 1
+    assert daemon._stats["police_findings"] >= 3
+
+
 def test_daemon_full_pipeline_sniff_verify_seal(tmp_path):
     """End-to-end v0.3.0: arrival → sniff → verify-fork → seal → outbox.
 
