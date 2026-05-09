@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from tibet_continuityd.coalesce import ArrivalCoalescer
 from tibet_continuityd.sniff import IntakeClass, sniff_payload
 from tibet_continuityd.watch import LaneWatcher
 
@@ -52,6 +53,14 @@ class DaemonConfig:
     quarantine_dir: Optional[Path] = None        # v0.2+
     triage_dir: Optional[Path] = None            # v0.2+
     extra_lanes: list = field(default_factory=list)
+    coalesce_debounce_ms: int = 350
+    coalesce_max_pending_age_ms: int = 5000
+    coalesce_high_churn_threshold: int = 5
+    # v0.3.0 Seal stage
+    enable_seal: bool = False
+    outbox_dir: Optional[Path] = None
+    outbox_staging_dir: Optional[Path] = None
+    outbox_receiver_aint: str = "self.aint"
 
     @classmethod
     def from_env(cls) -> "DaemonConfig":
@@ -72,6 +81,26 @@ class DaemonConfig:
             triage_dir=Path(os.environ.get(
                 "TIBET_CONTINUITYD_TRIAGE",
                 "/var/lib/tibet/triage")),
+            coalesce_debounce_ms=int(os.environ.get(
+                "TIBET_CONTINUITYD_COALESCE_DEBOUNCE_MS",
+                "350")),
+            coalesce_max_pending_age_ms=int(os.environ.get(
+                "TIBET_CONTINUITYD_COALESCE_MAX_PENDING_AGE_MS",
+                "5000")),
+            coalesce_high_churn_threshold=int(os.environ.get(
+                "TIBET_CONTINUITYD_COALESCE_HIGH_CHURN_THRESHOLD",
+                "5")),
+            enable_seal=os.environ.get(
+                "TIBET_CONTINUITYD_ENABLE_SEAL", "0") in ("1", "true", "yes"),
+            outbox_dir=Path(os.environ["TIBET_CONTINUITYD_OUTBOX"])
+                if os.environ.get("TIBET_CONTINUITYD_OUTBOX") else None,
+            outbox_staging_dir=Path(
+                os.environ["TIBET_CONTINUITYD_OUTBOX_STAGING"])
+                if os.environ.get("TIBET_CONTINUITYD_OUTBOX_STAGING")
+                else None,
+            outbox_receiver_aint=os.environ.get(
+                "TIBET_CONTINUITYD_OUTBOX_RECEIVER",
+                "self.aint"),
         )
 
 
@@ -107,12 +136,39 @@ class ContinuityDaemon:
             "events_sniffed": 0,
             "events_verified": 0,
             "events_forked": 0,
+            "events_coalesced": 0,
+            "events_sealed": 0,
             "by_class": {},
             "by_disposition": {},
         }
         self._actor_id = self._ACTOR_ID_TEMPLATE.format(
             host=socket.gethostname() or "unknown"
         )
+
+        # v0.3.0 Seal stage — opt-in. If enabled, mint an ephemeral
+        # signer for this daemon-run. Production deployments should
+        # provide a hardware-bound JIS keypair via a future
+        # TIBET_CONTINUITYD_SIGNER_KEYPATH config. For now: ephemeral.
+        self._seal_engine = None
+        if cfg.enable_seal:
+            from tibet_continuityd.seal import SealEngine
+            from tibet_drop.crypto import IdentityKey  # type: ignore
+
+            outbox = cfg.outbox_dir or Path("/var/lib/tibet/outbox")
+            staging = cfg.outbox_staging_dir or \
+                Path("/var/lib/tibet/outbox.staging")
+            self._seal_signer = IdentityKey.generate()
+            self._seal_engine = SealEngine(
+                signer=self._seal_signer,
+                actor_id=self._actor_id,
+                outbox=outbox,
+                staging=staging,
+            )
+            self.log.info(
+                f"seal stage enabled: outbox={outbox}, "
+                f"staging={staging}, "
+                f"signer pub={self._seal_signer.pub_bytes().hex()[:16]}..."
+            )
 
     def _setup_logging(self) -> logging.Logger:
         log = logging.getLogger("tibet-continuityd")
@@ -180,9 +236,16 @@ class ContinuityDaemon:
             "stage": "sniff",
             "mode": self.cfg.mode,
             "flags": int(event.flags),
+            "coalesced": event.coalesced,
+            "coalesced_event_count": event.coalesced_event_count,
+            "coalesced_window_ms": event.coalesced_window_ms,
+            "settled_after_ms": event.settled_after_ms,
+            "path_churn_detected": event.path_churn_detected,
             **sniff_result.to_dict(),
             **intake_causal_ids.to_dict(),
         }
+        if event.coalesced:
+            self._stats["events_coalesced"] += 1
         self._emit_audit(sniff_record)
         self.log.info(
             f"arrival: {event.name!r} → "
@@ -238,6 +301,11 @@ class ContinuityDaemon:
             "surface_status": vf_result.surface_status,
             "disposition": vf_result.disposition,
             "verify_errors": vf_result.verify_errors,
+            "coalesced": event.coalesced,
+            "coalesced_event_count": event.coalesced_event_count,
+            "coalesced_window_ms": event.coalesced_window_ms,
+            "settled_after_ms": event.settled_after_ms,
+            "path_churn_detected": event.path_churn_detected,
             **vf_result.causal_ids.to_dict(),
         }
         self._emit_audit(verify_record)
@@ -249,6 +317,62 @@ class ContinuityDaemon:
             f"[gen={vf_result.causal_ids.generation}, "
             f"action={vf_result.causal_ids.action_id}, "
             f"verdict={vf_result.causal_ids.trust_verdict_id}]"
+        )
+
+        # ─── Seal stage (v0.3.0, only on trusted-fork) ─────────
+        if self._seal_engine is None:
+            return
+        if vf_result.disposition != "trusted-fork":
+            # Only trusted disposition gets resealed to outbox.
+            # Triage/reject/reseal-required dispositions are
+            # handled by Police stage (v0.3.x future work).
+            return
+
+        try:
+            # Re-pack the verified bundle as a single payload-block.
+            # Daemon's actor identity becomes sender (= self-attest:
+            # "I observed and accepted this state"). Receiver_aint
+            # is the configured outbox-target (default "self.aint"
+            # for local pipeline-resume scenarios).
+            original_bytes = event.full_path.read_bytes()
+            ephemeral_receiver = self._seal_signer  # self-target
+            seal_result = self._seal_engine.reseal(
+                prior_causal_ids=vf_result.causal_ids,
+                receiver_aint=self.cfg.outbox_receiver_aint,
+                receiver_pubkey_hex=ephemeral_receiver.pub_bytes().hex(),
+                sender_aint=f"continuityd@{socket.gethostname() or 'host'}",
+                blocks=[(event.name, original_bytes)],
+                surface_context="resealed",
+                surface_profile=vf_result.manifest.get(
+                    "surface_profile", "tza"),
+                surface_priority=vf_result.manifest.get(
+                    "surface_priority", "normal"),
+                causal_reason="trusted-resealed",
+            )
+        except Exception as e:
+            self.log.warning(f"seal failed: {e}")
+            return
+
+        self._stats["events_sealed"] += 1
+        seal_record = {
+            "ts": time.time(),
+            "lane": str(event.lane),
+            "name": event.name,
+            "stage": "seal",
+            "mode": self.cfg.mode,
+            "sealed_path": str(seal_result.sealed_path),
+            "bytes_written": seal_result.bytes_written,
+            "duration_ms": seal_result.duration_ms,
+            **seal_result.causal_ids.to_dict(),
+        }
+        self._emit_audit(seal_record)
+        self.log.info(
+            f"seal: {event.name!r} → "
+            f"{seal_result.sealed_path.name} "
+            f"({seal_result.bytes_written}B, "
+            f"{seal_result.duration_ms:.1f}ms) "
+            f"[gen={seal_result.causal_ids.generation}, "
+            f"action={seal_result.causal_ids.action_id}]"
         )
 
     def _install_signals(self) -> None:
@@ -278,24 +402,38 @@ class ContinuityDaemon:
 
         # Ensure inbox exists
         self.cfg.inbox.mkdir(parents=True, exist_ok=True)
+        coalescer = ArrivalCoalescer(
+            debounce_window_ms=self.cfg.coalesce_debounce_ms,
+            max_pending_age_ms=self.cfg.coalesce_max_pending_age_ms,
+            high_churn_threshold=self.cfg.coalesce_high_churn_threshold,
+        )
 
         with LaneWatcher([self.cfg.inbox]) as watcher:
             self.log.info(f"watching: {self.cfg.inbox}")
+
+            def _flush_settled() -> None:
+                for settled in coalescer.flush_ready():
+                    self._on_arrival(settled)
+
             # stop_cb pattern: watcher checks self._stop on every
             # select-timeout AND after every yielded event, so
             # SIGTERM is honored within ~timeout_sec regardless of
             # arrival rate. Without this, an idle inbox would block
             # shutdown indefinitely (systemd force-kill after 90s).
             for event in watcher.events(
-                timeout_sec=1.0,
+                timeout_sec=0.1,
                 stop_cb=lambda: self._stop,
+                timeout_cb=_flush_settled,
             ):
                 if self._stop:
                     break
                 self._stats["events_total"] += 1
                 if not event.is_arrival:
                     continue
-                self._on_arrival(event)
+                coalescer.ingest(event)
+                _flush_settled()
+
+            _flush_settled()
 
         self.log.info(f"shutdown stats: {self._stats}")
         return 0

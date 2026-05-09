@@ -13,6 +13,9 @@ from pathlib import Path
 
 import pytest
 
+_TIBET_DROP = Path("/srv/jtel-stack/sandbox/airdrop-cli/src")
+if str(_TIBET_DROP) not in sys.path:
+    sys.path.insert(0, str(_TIBET_DROP))
 _PKG = Path("/srv/jtel-stack/packages/tibet-continuityd/src")
 if str(_PKG) not in sys.path:
     sys.path.insert(0, str(_PKG))
@@ -106,3 +109,144 @@ def test_daemon_stats_reflect_processing(tmp_path):
     assert daemon._stats["events_arrival"] >= 5
     assert daemon._stats["events_sniffed"] >= 5
     assert daemon._stats["by_class"].get("sealed-tbz", 0) >= 5
+
+
+def test_daemon_coalesces_multiple_writes_to_same_path(tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    audit = tmp_path / "audit.jsonl"
+    cfg = DaemonConfig(
+        inbox=inbox,
+        audit_jsonl=audit,
+        mode="passive",
+        log_level="WARNING",
+        coalesce_debounce_ms=80,
+    )
+    daemon = ContinuityDaemon(cfg)
+
+    thread = threading.Thread(target=daemon.run, daemon=True)
+    thread.start()
+    time.sleep(0.2)
+
+    target = inbox / "churned.tza"
+    target.write_bytes(TBZ_MAGIC + b"A" * 8)
+    time.sleep(0.02)
+    target.write_bytes(TBZ_MAGIC + b"B" * 16)
+    time.sleep(0.02)
+    target.write_bytes(TBZ_MAGIC + b"C" * 24)
+
+    time.sleep(0.4)
+    daemon._stop = True
+    thread.join(timeout=2.0)
+
+    records = [json.loads(line) for line in audit.read_text().splitlines()]
+    assert len(records) == 1
+    record = records[0]
+    assert record["name"] == "churned.tza"
+    assert record["coalesced"] is True
+    assert record["coalesced_event_count"] >= 2
+    assert daemon._stats["events_arrival"] == 1
+    assert daemon._stats["events_coalesced"] == 1
+
+
+def test_daemon_full_pipeline_sniff_verify_seal(tmp_path):
+    """End-to-end v0.3.0: arrival → sniff → verify-fork → seal → outbox.
+
+    Drops a real signed TBZ bundle into inbox under MODE=active +
+    enable_seal=True. Verifies all four audit-stages emit and a
+    sealed bundle lands in outbox.
+    """
+    from tibet_drop.bundle import pack_bundle, verify_bundle
+    from tibet_drop.crypto import IdentityKey
+    from tibet_drop.handshake import new_tpid
+
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    outbox = tmp_path / "outbox"
+    staging = tmp_path / "outbox.staging"
+
+    cfg = DaemonConfig(
+        inbox=inbox,
+        audit_jsonl=tmp_path / "audit.jsonl",
+        mode="active",
+        log_level="WARNING",
+        enable_seal=True,
+        outbox_dir=outbox,
+        outbox_staging_dir=staging,
+        outbox_receiver_aint="next-host.aint",
+    )
+    daemon = ContinuityDaemon(cfg)
+
+    thread = threading.Thread(target=daemon.run, daemon=True)
+    thread.start()
+    time.sleep(0.3)
+
+    # Pack a real signed TBZ bundle into inbox
+    alice, bob = IdentityKey.generate(), IdentityKey.generate()
+    bundle = inbox.parent / "src.tza"
+    pack_bundle(
+        output_path=bundle,
+        blocks=[("payload.json", b'{"e2e":"v0.3.0"}')],
+        sender_aint="alice.aint",
+        sender_signer=alice,
+        receiver_aint="bob.aint",
+        receiver_pubkey_hex=bob.pub_bytes().hex(),
+        payload_type="ai_state",
+        tpid=new_tpid(),
+        surface_time_fragment="2026-05-09",
+        surface_context="e2e-test",
+        surface_profile="claude",
+        surface_priority="normal",
+    )
+    # Move into watched inbox via atomic mv
+    final = inbox / "2026-05-09.e2e-test.claude.normal.tza"
+    bundle.rename(final)
+
+    time.sleep(0.6)
+    daemon._stop = True
+    thread.join(timeout=2.0)
+
+    # Audit should have 3 stages: sniff + verify-fork + seal
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "audit.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    stages = [r["stage"] for r in records]
+    assert "sniff" in stages
+    assert "verify-fork" in stages
+    assert "seal" in stages, f"seal stage missing; got {stages}"
+
+    # Outbox should contain the resealed bundle
+    sealed_files = list(outbox.glob("*.tza"))
+    assert len(sealed_files) == 1, \
+        f"expected 1 sealed bundle in outbox, got {len(sealed_files)}"
+
+    # Sealed bundle must be cryptographically valid
+    valid, manifest, errors = verify_bundle(sealed_files[0])
+    assert valid, f"sealed bundle should verify: {errors}"
+
+    # Daemon stats
+    assert daemon._stats["events_sniffed"] >= 1
+    assert daemon._stats["events_verified"] >= 1
+    assert daemon._stats["events_forked"] >= 1
+    assert daemon._stats["events_sealed"] >= 1
+
+    # Causal lineage chain visible in audit
+    sniff_record = next(r for r in records if r["stage"] == "sniff")
+    verify_record = next(r for r in records if r["stage"] == "verify-fork")
+    seal_record = next(r for r in records if r["stage"] == "seal")
+
+    # All three stages share continuity_id
+    assert sniff_record["continuity_id"] == \
+        verify_record["continuity_id"] == \
+        seal_record["continuity_id"]
+
+    # Generation increments: 0 (sniff) → 1 (verify) → 2 (seal)
+    assert sniff_record["generation"] == 0
+    assert verify_record["generation"] == 1
+    assert seal_record["generation"] == 2
+
+    # parent_action chain: verify ← sniff, seal ← verify
+    assert verify_record["parent_action_id"] == sniff_record["action_id"]
+    assert seal_record["parent_action_id"] == verify_record["action_id"]

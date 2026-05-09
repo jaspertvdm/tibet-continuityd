@@ -148,6 +148,7 @@ class LaneWatcher:
         self,
         timeout_sec: float = 1.0,
         stop_cb: Optional[Callable[[], bool]] = None,
+        timeout_cb: Optional[Callable[[], None]] = None,
     ) -> Iterator[WatchEvent]:
         """Yield WatchEvents until stop_cb() returns True or fd closes.
 
@@ -167,6 +168,8 @@ class LaneWatcher:
                 return
             r, _, _ = select.select([self.fd], [], [], timeout_sec)
             if not r:
+                if timeout_cb:
+                    timeout_cb()
                 continue
             buf = os.read(self.fd, 65536)
             offset = 0
