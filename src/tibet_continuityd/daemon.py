@@ -205,12 +205,17 @@ class ContinuityDaemon:
         if sniff_result.intake_class not in sealed_classes:
             return
 
-        # Run verify + fork
+        # Run verify + fork (with v0.2.1 trust-kernel hook)
+        # zone_name derived from lane basename (e.g. /var/lib/tibet/
+        # inbox → "inbox"). Falls back to "inbox" if path is empty.
+        zone_name = event.lane.name or "inbox"
         try:
             vf_result = verify_and_fork(
                 event.full_path,
                 actor_id=self._actor_id,
                 intake_causal_ids=intake_causal_ids,
+                intake_class=sniff_result.intake_class.value,
+                zone_name=zone_name,
             )
         except Exception as e:
             self.log.warning(f"verify_fork failed: {e}")
@@ -242,7 +247,8 @@ class ContinuityDaemon:
             f"(verify={'valid' if vf_result.valid else 'invalid'}, "
             f"surface={vf_result.surface_status}) "
             f"[gen={vf_result.causal_ids.generation}, "
-            f"action={vf_result.causal_ids.action_id}]"
+            f"action={vf_result.causal_ids.action_id}, "
+            f"verdict={vf_result.causal_ids.trust_verdict_id}]"
         )
 
     def _install_signals(self) -> None:
