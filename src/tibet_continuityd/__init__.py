@@ -26,11 +26,16 @@ Plus: /srv/jtel-stack/hersenspinsels/tibet-continuity-guardian.md
                                 — Codex, 9 mei 2026
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __author__ = "Jasper van de Meent, Root AI, Codex"
 
 from tibet_continuityd.daemon import ContinuityDaemon
 from tibet_continuityd.sniff import IntakeClass, sniff_payload
+from tibet_continuityd.verify_fork import (
+    CausalIDs,
+    VerifyForkResult,
+    verify_and_fork,
+)
 from tibet_continuityd.watch import LaneWatcher, WatchEvent
 
 __all__ = [
@@ -39,4 +44,7 @@ __all__ = [
     "WatchEvent",
     "IntakeClass",
     "sniff_payload",
+    "CausalIDs",
+    "VerifyForkResult",
+    "verify_and_fork",
 ]
