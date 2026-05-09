@@ -55,6 +55,14 @@ class IntakeClass(Enum):
     JSON_TEXT = "json-text"                 # plain JSON state
     UNKNOWN = "unknown"                     # everything else
     EMPTY = "empty"                         # zero-byte file
+    STAGING = "staging"                     # .part / .tmp = in-flight write
+
+
+# Suffixes that indicate a writer is still finishing the file
+# (per Codex' atomic-transfer-convention.md). These should NOT
+# trigger sniff/verify/fork — they will be RENAMED into a final
+# name once the writer is done.
+STAGING_SUFFIXES = frozenset({"part", "tmp", "writing", "inflight"})
 
 
 @dataclass
@@ -119,6 +127,11 @@ def sniff_payload(path: Path) -> SniffResult:
     Returns a SniffResult with intake classification + disposition
     hint. Does NOT verify cryptographic integrity — that is the
     Verify stage (v0.2). Sniff is content-recognition only.
+
+    v0.3.0: files with staging suffixes (.part, .tmp, .writing,
+    .inflight) are recognized as STAGING and disposition is
+    "ignore" — writer is still in flight, wait for atomic mv
+    to final name.
     """
     if not path.exists() or not path.is_file():
         return SniffResult(
@@ -128,6 +141,21 @@ def sniff_payload(path: Path) -> SniffResult:
             magic_prefix_hex="",
             size_bytes=0,
             disposition_hint="quarantine",
+        )
+
+    extension_check = path.suffix.lstrip(".").lower()
+    if extension_check in STAGING_SUFFIXES:
+        # In-flight write — writer is still appending. Skip;
+        # the eventual atomic rename will trigger MOVED_TO
+        # event with the final filename, and that will be
+        # processed normally.
+        return SniffResult(
+            intake_class=IntakeClass.STAGING,
+            extension=extension_check,
+            surface_extension_implies_sealed=False,
+            magic_prefix_hex="",
+            size_bytes=path.stat().st_size,
+            disposition_hint="ignore",
         )
 
     size_bytes = path.stat().st_size

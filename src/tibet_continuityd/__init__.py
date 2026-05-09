@@ -26,10 +26,11 @@ Plus: /srv/jtel-stack/hersenspinsels/tibet-continuity-guardian.md
                                 — Codex, 9 mei 2026
 """
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 __author__ = "Jasper van de Meent, Root AI, Codex"
 
 from tibet_continuityd.daemon import ContinuityDaemon
+from tibet_continuityd.seal import SealEngine, SealResult
 from tibet_continuityd.sniff import IntakeClass, sniff_payload
 from tibet_continuityd.trust_kernel import (
     TrustQuery,
@@ -59,4 +60,6 @@ __all__ = [
     "query_trust_kernel",
     "apply_verdict_to_disposition",
     "load_policies",
+    "SealEngine",
+    "SealResult",
 ]
