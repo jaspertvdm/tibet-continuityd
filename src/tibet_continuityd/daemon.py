@@ -65,6 +65,11 @@ class DaemonConfig:
     enable_police: bool = False
     police_scan_interval_sec: float = 30.0       # how often to scan
     police_age_alert_threshold_sec: float = 300.0  # lingering bumps WARN
+    # v0.3.2 Backpressure / circuit breaker (axe 3)
+    enable_backpressure: bool = False
+    backpressure_low_water: int = 2000
+    backpressure_high_water: int = 5000
+    backpressure_check_interval_sec: float = 5.0
 
     @classmethod
     def from_env(cls) -> "DaemonConfig":
@@ -112,6 +117,15 @@ class DaemonConfig:
                 "TIBET_CONTINUITYD_POLICE_INTERVAL_SEC", "30")),
             police_age_alert_threshold_sec=float(os.environ.get(
                 "TIBET_CONTINUITYD_POLICE_AGE_ALERT_SEC", "300")),
+            enable_backpressure=os.environ.get(
+                "TIBET_CONTINUITYD_ENABLE_BACKPRESSURE", "0")
+                in ("1", "true", "yes"),
+            backpressure_low_water=int(os.environ.get(
+                "TIBET_CONTINUITYD_BACKPRESSURE_LOW_WATER", "2000")),
+            backpressure_high_water=int(os.environ.get(
+                "TIBET_CONTINUITYD_BACKPRESSURE_HIGH_WATER", "5000")),
+            backpressure_check_interval_sec=float(os.environ.get(
+                "TIBET_CONTINUITYD_BACKPRESSURE_INTERVAL_SEC", "5")),
         )
 
 
@@ -159,6 +173,28 @@ class ContinuityDaemon:
             host=socket.gethostname() or "unknown"
         )
         self._last_police_scan_ts: float = 0.0
+        self._last_backpressure_check_ts: float = 0.0
+        self._stats["backpressure_checks"] = 0
+        self._stats["backpressure_transitions"] = 0
+        self._stats["backpressure_state"] = "normal"
+
+        # v0.3.2 Backpressure monitor — opt-in. Periodic depth-check
+        # via watcher's timeout_cb hook. Emits state-transition audit
+        # records when crossing low/high water marks.
+        self._backpressure_monitor = None
+        if cfg.enable_backpressure:
+            from tibet_continuityd.backpressure import BackpressureMonitor
+            self._backpressure_monitor = BackpressureMonitor(
+                lane=cfg.inbox,
+                low_water=cfg.backpressure_low_water,
+                high_water=cfg.backpressure_high_water,
+            )
+            self.log.info(
+                f"backpressure monitor enabled: "
+                f"low={cfg.backpressure_low_water}, "
+                f"high={cfg.backpressure_high_water}, "
+                f"interval={cfg.backpressure_check_interval_sec}s"
+            )
 
         # v0.3.1 Police stage — opt-in. Periodic scan via watcher's
         # timeout_cb hook (= no extra thread, uses existing timer
@@ -448,9 +484,11 @@ class ContinuityDaemon:
 
             def _periodic_tasks() -> None:
                 """Called on every watcher select-timeout. Hosts both
-                the coalesce-flush and the police-scan rhythms."""
+                the coalesce-flush, the police-scan rhythms, and
+                the backpressure-monitor check."""
                 _flush_settled()
                 self._maybe_run_police_scan()
+                self._maybe_run_backpressure_check()
 
             # stop_cb pattern: watcher checks self._stop on every
             # select-timeout AND after every yielded event, so
@@ -538,6 +576,51 @@ class ContinuityDaemon:
                 f"{finding.severity.value}/{action.action} "
                 f"({finding.intake_class})"
             )
+
+    def _maybe_run_backpressure_check(self) -> None:
+        """Run a backpressure check if enabled AND interval elapsed.
+
+        Per Codex' timeout_cb hook design — shares rhythm with
+        coalesce-flush and police-scan. No separate thread.
+        """
+        if self._backpressure_monitor is None:
+            return
+        now = time.time()
+        if now - self._last_backpressure_check_ts < \
+                self.cfg.backpressure_check_interval_sec:
+            return
+        self._last_backpressure_check_ts = now
+
+        try:
+            snap = self._backpressure_monitor.check()
+        except Exception as e:
+            self.log.warning(f"backpressure check failed: {e}")
+            return
+
+        self._stats["backpressure_checks"] += 1
+        self._stats["backpressure_state"] = snap.state.value
+
+        # Only emit audit on state-transitions (= actionable events)
+        if not snap.transitioned:
+            return
+
+        self._stats["backpressure_transitions"] += 1
+
+        # Emit state-transition audit record
+        bp_record = {
+            "ts": time.time(),
+            "stage": "backpressure",
+            "mode": self.cfg.mode,
+            "actor_id": self._actor_id,
+            **snap.to_dict(),
+        }
+        self._emit_audit(bp_record)
+        self.log.info(
+            f"backpressure: {snap.prev_state.value if snap.prev_state else 'init'} "
+            f"→ {snap.state.value} "
+            f"[depth={snap.inbox_depth} "
+            f"(low={snap.low_water}, high={snap.high_water})]"
+        )
 
 
 def main() -> int:

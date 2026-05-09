@@ -26,9 +26,14 @@ Plus: /srv/jtel-stack/hersenspinsels/tibet-continuity-guardian.md
                                 — Codex, 9 mei 2026
 """
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 __author__ = "Jasper van de Meent, Root AI, Codex"
 
+from tibet_continuityd.backpressure import (
+    BackpressureMonitor,
+    BackpressureSnapshot,
+    BackpressureState,
+)
 from tibet_continuityd.daemon import ContinuityDaemon
 from tibet_continuityd.police import (
     FindingSeverity,
@@ -74,4 +79,7 @@ __all__ = [
     "PoliceAction",
     "FindingSeverity",
     "apply_action",
+    "BackpressureMonitor",
+    "BackpressureSnapshot",
+    "BackpressureState",
 ]
