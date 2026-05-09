@@ -1,0 +1,40 @@
+[Unit]
+Description=TIBET Continuity Guardian — distributed continuity OS daemon
+Documentation=https://humotica.com/continuityd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tibet
+Group=tibet
+
+# Filesystem hierarchy per spec §4
+Environment=TIBET_CONTINUITYD_INBOX=/var/lib/tibet/inbox
+Environment=TIBET_CONTINUITYD_QUARANTINE=/var/lib/tibet/quarantine
+Environment=TIBET_CONTINUITYD_TRIAGE=/var/lib/tibet/triage
+Environment=TIBET_CONTINUITYD_AUDIT=/var/log/tibet/continuityd-audit.jsonl
+Environment=TIBET_CONTINUITYD_MODE=passive
+Environment=TIBET_CONTINUITYD_LOG_LEVEL=INFO
+
+ExecStart=/usr/bin/python3 -m tibet_continuityd
+Restart=on-failure
+RestartSec=5
+
+# Hardening — daemon should NOT need privileges beyond reading
+# its own state directories.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/tibet /var/log/tibet
+
+# inotify file descriptor limit (default 8192 may be too low)
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

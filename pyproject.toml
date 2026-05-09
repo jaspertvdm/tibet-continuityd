@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tibet-continuityd"
+version = "0.1.0"
+description = "Continuous integrity system daemon for the TIBET stack — Watch, Sniff, Verify, Fork, Triage, Reseal."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Jasper van de Meent", email = "info@humotica.com"},
+    {name = "Root AI", email = "root_idd@humotica.nl"},
+    {name = "Codex", email = "codex@humotica.nl"},
+]
+keywords = [
+    "tibet", "continuity", "daemon", "audit", "trust",
+    "inotify", "libmagic", "icc", "tbz", "ssm", "phantom",
+    "distributed-continuity-os", "humotica",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security :: Cryptography",
+    "Topic :: System :: Monitoring",
+    "Topic :: System :: Logging",
+]
+
+# v0.1 has zero hard runtime dependencies; uses ctypes for inotify
+# and an in-package magic-byte table.
+dependencies = []
+
+[project.optional-dependencies]
+# v0.2+ will add tibet-drop and tibet-phantom for Verify + Fork
+v02 = [
+    "tibet-drop>=0.1.0",
+    "tibet-phantom>=0.2.0",
+]
+
+[project.scripts]
+tibet-continuityd = "tibet_continuityd.daemon:main"
+
+[project.urls]
+Homepage = "https://humotica.com"
+Spec = "https://github.com/Humotica/tibet-continuityd/blob/main/SPEC.md"
