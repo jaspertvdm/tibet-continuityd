@@ -149,6 +149,64 @@ def test_daemon_coalesces_multiple_writes_to_same_path(tmp_path):
     assert daemon._stats["events_coalesced"] == 1
 
 
+def test_daemon_strict_mode_rejects_non_sealed_arrivals(tmp_path):
+    """v0.3.3 Mode strict: non-sealed arrivals are rejected
+    immediately (no verify-fork-seal pipeline waste)."""
+    from tibet_drop.crypto import IdentityKey
+    from tibet_continuityd.sniff import TBZ_MAGIC
+
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    quarantine = tmp_path / "quarantine"
+
+    cfg = DaemonConfig(
+        inbox=inbox,
+        audit_jsonl=tmp_path / "audit.jsonl",
+        mode="strict",
+        log_level="WARNING",
+        quarantine_dir=quarantine,
+    )
+    daemon = ContinuityDaemon(cfg)
+
+    thread = threading.Thread(target=daemon.run, daemon=True)
+    thread.start()
+    time.sleep(0.3)
+
+    # Drop a non-sealed file (= disguised .claude with plain text)
+    (inbox / "fake.claude").write_bytes(b"plain text, no TBZ magic")
+    # Plus a sealed bundle that should pass
+    (inbox / "real.tza").write_bytes(TBZ_MAGIC + b"\x01" + b"\x00" * 50)
+
+    time.sleep(0.5)
+    daemon._stop = True
+    thread.join(timeout=2.0)
+
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "audit.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+
+    # Should have strict-reject for fake.claude
+    rejects = [r for r in records if r.get("stage") == "strict-reject"]
+    assert len(rejects) >= 1
+    rejected = next(r for r in rejects if r["name"] == "fake.claude")
+    assert rejected["intake_class"] == "disguised"
+    assert rejected["moved_to"] is not None
+    assert rejected["mode"] == "strict"
+
+    # Disguised file moved to quarantine
+    assert not (inbox / "fake.claude").exists()
+    quarantined = list(quarantine.glob("fake.claude*"))
+    assert len(quarantined) == 1
+
+    # Sealed bundle stays in inbox (passes through to verify-fork)
+    assert (inbox / "real.tza").exists()
+
+    # Stats reflect the strict-reject
+    assert daemon._stats.get("strict_rejects", 0) >= 1
+
+
 def test_daemon_police_scan_finds_unpacked_state(tmp_path):
     """v0.3.1 — daemon's periodic police scan detects existing
     unpacked state in the inbox lane and emits audit records."""

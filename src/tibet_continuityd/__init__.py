@@ -26,7 +26,7 @@ Plus: /srv/jtel-stack/hersenspinsels/tibet-continuity-guardian.md
                                 — Codex, 9 mei 2026
 """
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 __author__ = "Jasper van de Meent, Root AI, Codex"
 
 from tibet_continuityd.backpressure import (

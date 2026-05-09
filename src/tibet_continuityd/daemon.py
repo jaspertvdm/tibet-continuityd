@@ -322,16 +322,31 @@ class ContinuityDaemon:
             f"[continuity={intake_causal_ids.continuity_id}]"
         )
 
-        # ─── Verify + Fork stages (v0.2, only in active mode) ──
-        if self.cfg.mode != "active":
-            return
-
-        # Only sealed-tbz arrivals get verify + fork in v0.2.
-        # (sealed-tbz-no-ext also qualifies — same magic, no ext)
+        # Sealed classes that proceed to verify+fork+seal
         sealed_classes = {
             IntakeClass.SEALED_TBZ,
             IntakeClass.SEALED_TBZ_NO_EXT,
         }
+
+        # ─── Mode strict (v0.3.3): zero-trust intake ─────────
+        # Non-sealed arrivals get rejected immediately:
+        #   • emit 'strict-rejected' audit
+        #   • mv to quarantine_dir if configured (= operator
+        #     review later); else: leave but flag
+        #   • skip verify-fork-seal entirely
+        if self.cfg.mode == "strict" and \
+                sniff_result.intake_class not in sealed_classes:
+            self._handle_strict_reject(
+                event, sniff_result, intake_causal_ids
+            )
+            return
+
+        # ─── Verify + Fork stages (v0.2, active or strict) ──
+        if self.cfg.mode not in ("active", "strict"):
+            return
+
+        # Only sealed-tbz arrivals get verify + fork.
+        # (sealed-tbz-no-ext also qualifies — same magic, no ext)
         if sniff_result.intake_class not in sealed_classes:
             return
 
@@ -576,6 +591,57 @@ class ContinuityDaemon:
                 f"{finding.severity.value}/{action.action} "
                 f"({finding.intake_class})"
             )
+
+    def _handle_strict_reject(self, event, sniff_result,
+                                intake_causal_ids) -> None:
+        """Mode-strict response to non-sealed arrival.
+
+        Per v0.3.3 Mode-strict polish: zero-trust intake means
+        non-sealed-tbz files get rejected immediately (no
+        verify-fork-seal pipeline waste).
+
+        Action:
+          • emit 'strict-rejected' audit record
+          • if quarantine_dir configured: mv file there
+          • increment stats counter
+        """
+        self._stats.setdefault("strict_rejects", 0)
+        self._stats["strict_rejects"] += 1
+
+        moved_to: Optional[Path] = None
+        rename_error: Optional[str] = None
+        if self.cfg.quarantine_dir is not None:
+            try:
+                self.cfg.quarantine_dir.mkdir(
+                    parents=True, exist_ok=True
+                )
+                target = self.cfg.quarantine_dir / event.name
+                if target.exists():
+                    target = self.cfg.quarantine_dir / \
+                        f"{event.name}.{int(time.time())}"
+                os.rename(str(event.full_path), str(target))
+                moved_to = target.resolve()
+            except OSError as e:
+                rename_error = str(e)
+
+        reject_record = {
+            "ts": time.time(),
+            "lane": str(event.lane),
+            "name": event.name,
+            "stage": "strict-reject",
+            "mode": "strict",
+            "intake_class": sniff_result.intake_class.value,
+            "disposition_hint": sniff_result.disposition_hint,
+            "moved_to": str(moved_to) if moved_to else None,
+            "rename_error": rename_error,
+            **intake_causal_ids.to_dict(),
+        }
+        self._emit_audit(reject_record)
+        self.log.info(
+            f"strict-reject: {event.name!r} → "
+            f"{sniff_result.intake_class.value} "
+            f"(moved_to={moved_to.name if moved_to else 'NONE'})"
+        )
 
     def _maybe_run_backpressure_check(self) -> None:
         """Run a backpressure check if enabled AND interval elapsed.
