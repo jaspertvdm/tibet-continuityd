@@ -1,0 +1,30 @@
+[Unit]
+Description=TIBET Continuity Guardian Appliance
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+EnvironmentFile=/etc/tibet/continuityd.env
+Environment=PYTHONPATH=/srv/jtel-stack/packages/tibet-continuityd/src:/srv/jtel-stack/sandbox/airdrop-cli/src
+
+ExecStart=/usr/bin/python3 -m tibet_continuityd
+Restart=on-failure
+RestartSec=3
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/tibet /var/log/tibet
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
