@@ -375,8 +375,12 @@ def test_surface_hash_chain_prev_link(alice_bob, intake_ids):
             intake_ids.surface_hash
 
 
-def test_trust_verdict_id_null_in_v02(alice_bob, intake_ids):
-    """trust_verdict_id is reserved for v0.2.1 trust-kernel hook."""
+def test_trust_verdict_id_filled_in_v021(alice_bob, intake_ids):
+    """v0.2.1: trust_verdict_id is now populated by trust-kernel hook.
+
+    (v0.2 emitted None as placeholder. v0.2.1 fills it with a
+     deterministic tv_<16-hex> id from query_trust_kernel.)
+    """
     alice, bob = alice_bob
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -385,6 +389,23 @@ def test_trust_verdict_id_null_in_v02(alice_bob, intake_ids):
         result = verify_and_fork(
             bundle, actor_id="jis:test:host",
             intake_causal_ids=intake_ids,
+        )
+
+        assert result.causal_ids.trust_verdict_id is not None
+        assert result.causal_ids.trust_verdict_id.startswith("tv_")
+
+
+def test_trust_verdict_id_null_when_hook_disabled(alice_bob, intake_ids):
+    """apply_trust_kernel=False reverts to v0.2 behavior (null)."""
+    alice, bob = alice_bob
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bundle = _make_sealed_bundle(tmp, alice, bob)
+
+        result = verify_and_fork(
+            bundle, actor_id="jis:test:host",
+            intake_causal_ids=intake_ids,
+            apply_trust_kernel=False,
         )
 
         assert result.causal_ids.trust_verdict_id is None

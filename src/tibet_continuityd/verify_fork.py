@@ -175,6 +175,9 @@ def verify_and_fork(
     *,
     actor_id: str,
     intake_causal_ids: CausalIDs,
+    intake_class: str = "sealed-tbz",
+    zone_name: str = "inbox",
+    apply_trust_kernel: bool = True,
 ) -> VerifyForkResult:
     """
     Verify a sealed-tbz bundle and decide forward-causal
@@ -188,6 +191,10 @@ def verify_and_fork(
     Object_id may be inherited (= "same object, new step") or
     minted (= "new object derived from intake") depending on
     disposition.
+
+    v0.2.1: if apply_trust_kernel is True (default), the
+    base disposition is merged with a trust-kernel zone-policy
+    verdict. trust_verdict_id is now populated.
     """
     # Step 1: cryptographic verify
     valid, manifest, errors = verify_bundle(bundle_path)
@@ -235,6 +242,32 @@ def verify_and_fork(
     else:
         new_object_id = mint_object_id()
 
+    # v0.2.1: trust-kernel zone-policy hook
+    trust_verdict_id: Optional[str] = None
+    if apply_trust_kernel:
+        from tibet_continuityd.trust_kernel import (
+            TrustQuery,
+            apply_verdict_to_disposition,
+            query_trust_kernel,
+        )
+        verdict = query_trust_kernel(TrustQuery(
+            intake_class=intake_class,
+            zone_name=zone_name,
+            actor_id=actor_id,
+            object_id=new_object_id,
+        ))
+        merged_disposition, merge_reason = apply_verdict_to_disposition(
+            disposition, verdict
+        )
+        if merged_disposition != disposition:
+            # Verdict changed the disposition; update causal_reason
+            # to reflect the policy override
+            causal_reason = (
+                f"{causal_reason} | policy-override-{verdict.verdict}"
+            )
+            disposition = merged_disposition
+        trust_verdict_id = verdict.verdict_id
+
     new_causal_ids = CausalIDs(
         actor_id=actor_id,
         action_id=new_action_id,
@@ -246,7 +279,7 @@ def verify_and_fork(
         parent_object_id=intake_causal_ids.object_id,
         surface_hash=surface_hash,
         prev_surface_hash=intake_causal_ids.surface_hash,
-        trust_verdict_id=None,  # v0.2.1 trust-kernel hook
+        trust_verdict_id=trust_verdict_id,
     )
 
     return VerifyForkResult(
