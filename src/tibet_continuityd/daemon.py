@@ -275,7 +275,15 @@ class ContinuityDaemon:
 
         with LaneWatcher([self.cfg.inbox]) as watcher:
             self.log.info(f"watching: {self.cfg.inbox}")
-            for event in watcher.events(timeout_sec=1.0):
+            # stop_cb pattern: watcher checks self._stop on every
+            # select-timeout AND after every yielded event, so
+            # SIGTERM is honored within ~timeout_sec regardless of
+            # arrival rate. Without this, an idle inbox would block
+            # shutdown indefinitely (systemd force-kill after 90s).
+            for event in watcher.events(
+                timeout_sec=1.0,
+                stop_cb=lambda: self._stop,
+            ):
                 if self._stop:
                     break
                 self._stats["events_total"] += 1

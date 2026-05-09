@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass
 from enum import IntFlag
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator, Optional
 
 
 # ─── inotify constants (linux/inotify.h) ────────────────────────
@@ -144,9 +144,27 @@ class LaneWatcher:
     def __exit__(self, *exc) -> None:
         self.close()
 
-    def events(self, timeout_sec: float = 1.0) -> Iterator[WatchEvent]:
-        """Yield WatchEvents until interrupted. Polls with timeout."""
+    def events(
+        self,
+        timeout_sec: float = 1.0,
+        stop_cb: Optional[Callable[[], bool]] = None,
+    ) -> Iterator[WatchEvent]:
+        """Yield WatchEvents until stop_cb() returns True or fd closes.
+
+        stop_cb is checked after every select() timeout AND after
+        every yielded event, so SIGTERM-driven shutdown is honored
+        within `timeout_sec` regardless of arrival rate.
+
+        This matters: without stop_cb, a daemon receiving SIGTERM
+        on an idle inbox would hang forever in select.select()
+        because the inner generator only checks state after each
+        new file-event, which may never come. systemd would then
+        force-kill after TimeoutStopSec (default 90s) — operationally
+        unacceptable.
+        """
         while True:
+            if stop_cb and stop_cb():
+                return
             r, _, _ = select.select([self.fd], [], [], timeout_sec)
             if not r:
                 continue
@@ -178,3 +196,5 @@ class LaneWatcher:
                     is_dir=bool(flags & InotifyFlag.IN_ISDIR),
                     ts_unix=time.time(),
                 )
+                if stop_cb and stop_cb():
+                    return
