@@ -3,10 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REF_BASE="$(cd "$SCRIPT_DIR/.." && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(cd "$REF_BASE/../../../.." && pwd)}"
-
-CONT_SRC="$REPO_ROOT/packages/tibet-continuityd/src"
-FIXTURE_BASE="$REPO_ROOT/sandbox/ai/codex/continuityd-test-packages"
+# shellcheck source=../_lib.sh
+source "$REF_BASE/_lib.sh"
+_setup_all_paths
 AUDIT_SUMMARY="$REPO_ROOT/packages/tibet-continuityd/scripts/audit_summary.py"
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/continuityd-portable-eval.XXXXXX")"

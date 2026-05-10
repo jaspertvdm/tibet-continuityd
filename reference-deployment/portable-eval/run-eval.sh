@@ -3,15 +3,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REF_BASE="$(cd "$SCRIPT_DIR/.." && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(cd "$REF_BASE/../../../.." && pwd)}"
+# shellcheck source=../_lib.sh
+source "$REF_BASE/_lib.sh"
+_setup_all_paths
 
 CHECK_ENV="$SCRIPT_DIR/check-env.sh"
 RUN_MINI="$SCRIPT_DIR/run-mini-pipeline.sh"
-FIXTURE_BASE="$REPO_ROOT/sandbox/ai/codex/continuityd-test-packages"
 VECTOR_FILE="$FIXTURE_BASE/conformance-vectors-v1.jsonl"
 VECTOR_CHECK="$FIXTURE_BASE/check-conformance-vectors.py"
-CONT_SRC="$REPO_ROOT/packages/tibet-continuityd/src"
-DROP_SRC="$REPO_ROOT/sandbox/airdrop-cli/src"
 
 BUNDLE_PATH="${1:-}"
 

@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-FIXTURE_SCRIPT="/srv/jtel-stack/sandbox/ai/codex/continuityd-test-packages/drop-fixtures.sh"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REF_BASE="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=../_lib.sh
+source "$REF_BASE/_lib.sh"
+_setup_all_paths
+
+FIXTURE_SCRIPT="$FIXTURE_BASE/drop-fixtures.sh"
 TARGET_DIR="${1:-${TIBET_APPLIANCE_STATE_ROOT:-/var/lib/tibet}/inbox}"
 
 if [ ! -d "$TARGET_DIR" ]; then

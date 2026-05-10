@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REF_BASE="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=../_lib.sh
+source "$REF_BASE/_lib.sh"
+_setup_all_paths
+
 LAB_ROOT="${1:-${TIBET_DUAL_NODE_LAB_ROOT:-/tmp/continuityd-dual-node-lab}}"
-CONT_SRC="/srv/jtel-stack/packages/tibet-continuityd/src"
-DROP_SRC="/srv/jtel-stack/sandbox/airdrop-cli/src"
 
 start_node() {
   local node="$1"
