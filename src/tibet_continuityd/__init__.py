@@ -29,12 +29,12 @@ Plus: /srv/jtel-stack/hersenspinsels/tibet-continuity-guardian.md
 __version__ = "0.3.3"
 __author__ = "Jasper van de Meent, Root AI, Codex"
 
+# Core stages — pure stdlib, always available
 from tibet_continuityd.backpressure import (
     BackpressureMonitor,
     BackpressureSnapshot,
     BackpressureState,
 )
-from tibet_continuityd.daemon import ContinuityDaemon
 from tibet_continuityd.police import (
     FindingSeverity,
     PoliceAction,
@@ -42,7 +42,6 @@ from tibet_continuityd.police import (
     PoliceScanner,
     apply_action,
 )
-from tibet_continuityd.seal import SealEngine, SealResult
 from tibet_continuityd.sniff import IntakeClass, sniff_payload
 from tibet_continuityd.trust_kernel import (
     TrustQuery,
@@ -51,29 +50,41 @@ from tibet_continuityd.trust_kernel import (
     load_policies,
     query_trust_kernel,
 )
-from tibet_continuityd.verify_fork import (
-    CausalIDs,
-    VerifyForkResult,
-    verify_and_fork,
-)
 from tibet_continuityd.watch import LaneWatcher, WatchEvent
 
+# Verify + Fork + Seal — require tibet-drop (install via [verify] extra)
+# Defensive imports: core daemon works without these.
+try:
+    from tibet_continuityd.verify_fork import (
+        CausalIDs,
+        VerifyForkResult,
+        verify_and_fork,
+    )
+    from tibet_continuityd.seal import SealEngine, SealResult
+    from tibet_continuityd.daemon import ContinuityDaemon
+    _HAS_VERIFY = True
+except ImportError:
+    # tibet-drop not on sys.path — verify/fork/seal/daemon unavailable.
+    # Core sniff/police/trust_kernel/watch/backpressure still work.
+    CausalIDs = None  # type: ignore
+    VerifyForkResult = None  # type: ignore
+    verify_and_fork = None  # type: ignore
+    SealEngine = None  # type: ignore
+    SealResult = None  # type: ignore
+    ContinuityDaemon = None  # type: ignore
+    _HAS_VERIFY = False
+
 __all__ = [
-    "ContinuityDaemon",
+    # Core (always available)
     "LaneWatcher",
     "WatchEvent",
     "IntakeClass",
     "sniff_payload",
-    "CausalIDs",
-    "VerifyForkResult",
-    "verify_and_fork",
     "TrustQuery",
     "TrustVerdict",
     "query_trust_kernel",
     "apply_verdict_to_disposition",
     "load_policies",
-    "SealEngine",
-    "SealResult",
     "PoliceFinding",
     "PoliceScanner",
     "PoliceAction",
@@ -82,4 +93,13 @@ __all__ = [
     "BackpressureMonitor",
     "BackpressureSnapshot",
     "BackpressureState",
+    # Verify-stage (None when tibet-drop unavailable)
+    "ContinuityDaemon",
+    "CausalIDs",
+    "VerifyForkResult",
+    "verify_and_fork",
+    "SealEngine",
+    "SealResult",
+    # Capability flag
+    "_HAS_VERIFY",
 ]
