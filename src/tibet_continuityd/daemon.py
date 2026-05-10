@@ -73,23 +73,46 @@ class DaemonConfig:
 
     @classmethod
     def from_env(cls) -> "DaemonConfig":
-        """Build from environment variables (systemd-friendly)."""
+        """Build from environment variables (systemd-friendly).
+
+        Default paths follow FHS for appliance/systemd deployment
+        (/var/lib/tibet, /var/log/tibet). For non-root first-run
+        (laptop / peer-eval mode), defaults fall back to user-scoped
+        XDG paths under $HOME/.local/share/tibet/ and $HOME/.local/
+        state/tibet/. Override via TIBET_CONTINUITYD_* env-vars.
+        """
+        # Detect non-root user → use XDG-style user-scoped defaults.
+        # Root or env-override: stick to FHS appliance paths.
+        is_root = os.geteuid() == 0
+        if is_root:
+            _state = Path("/var/lib/tibet")
+            _logs = Path("/var/log/tibet")
+        else:
+            xdg_data = Path(os.environ.get(
+                "XDG_DATA_HOME",
+                Path.home() / ".local" / "share"))
+            xdg_state = Path(os.environ.get(
+                "XDG_STATE_HOME",
+                Path.home() / ".local" / "state"))
+            _state = xdg_data / "tibet"
+            _logs = xdg_state / "tibet"
+
         return cls(  # noqa: E1102
             inbox=Path(os.environ.get(
                 "TIBET_CONTINUITYD_INBOX",
-                "/var/lib/tibet/inbox")),
+                str(_state / "inbox"))),
             audit_jsonl=Path(os.environ.get(
                 "TIBET_CONTINUITYD_AUDIT",
-                "/var/log/tibet/continuityd-audit.jsonl")),
+                str(_logs / "continuityd-audit.jsonl"))),
             mode=os.environ.get("TIBET_CONTINUITYD_MODE", "passive"),
             log_level=os.environ.get(
                 "TIBET_CONTINUITYD_LOG_LEVEL", "INFO"),
             quarantine_dir=Path(os.environ.get(
                 "TIBET_CONTINUITYD_QUARANTINE",
-                "/var/lib/tibet/quarantine")),
+                str(_state / "quarantine"))),
             triage_dir=Path(os.environ.get(
                 "TIBET_CONTINUITYD_TRIAGE",
-                "/var/lib/tibet/triage")),
+                str(_state / "triage"))),
             coalesce_debounce_ms=int(os.environ.get(
                 "TIBET_CONTINUITYD_COALESCE_DEBOUNCE_MS",
                 "350")),
@@ -475,8 +498,9 @@ class ContinuityDaemon:
             self.log.debug("signal handlers skipped (not main thread)")
 
     def run(self) -> int:
+        from tibet_continuityd import __version__ as _ver
         self.log.info(
-            f"tibet-continuityd v0.2 starting "
+            f"tibet-continuityd v{_ver} starting "
             f"(mode={self.cfg.mode}, actor={self._actor_id}, "
             f"inbox={self.cfg.inbox})"
         )
