@@ -166,6 +166,78 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return daemon_main()
 
 
+def _cmd_ack(args: argparse.Namespace) -> int:
+    """Subcommand: send a signed ACK bundle referencing a prior event.
+
+    Phase D step 1 (v0.5.8): reply-loop primitive.
+
+    Flow:
+        1. Build a tiny ACK payload referencing the prior bundle's
+           name / object_id and the acking actor's identity.
+        2. Pack as a sealed TBZ via tibet-drop (= same as send).
+        3. Filename follows SSM convention:
+              <date>.ack-of-<shortid>.<profile>.<priority>.tza
+        4. Delivery reuses tcd send (= scp or http transport).
+
+    The ACK is a normal sealed envelope; the receiver's sniff
+    stage will pick it up like any other arrival. The
+    parent-reference lives in the payload JSON for now;
+    future v0.6+ will write a real `parent_action_id` into
+    the manifest itself.
+    """
+    src_name = args.ref  # name of the bundle being acked
+    short_id = "".join(c for c in src_name if c.isalnum())[:12]
+    if not short_id:
+        short_id = "unknown"
+
+    surface_time = args.surface_time or time.strftime("%Y-%m-%d")
+    surface_profile = args.surface_profile or "claude"
+    # ACK is low-priority by SSM-convention; "background" is the
+    # sandbox tibet-drop enum value for "non-urgent ambient signal".
+    surface_priority = args.surface_priority or "background"
+    surface_context = f"ack-of-{short_id}"
+
+    payload = {
+        "kind": "ack",
+        "version": "v0.5.8",
+        "referenced": src_name,
+        "ack_timestamp_iso": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+        ),
+        "ack_note": args.note or "",
+    }
+    with tempfile.NamedTemporaryFile(
+        prefix="tcd-ack-", suffix=".json",
+        mode="w", delete=False
+    ) as f:
+        import json as _json
+        _json.dump(payload, f)
+        ack_payload_path = f.name
+
+    # Reuse _cmd_send with the ack payload + custom surface fields
+    class _Synth:
+        pass
+    inner = _Synth()
+    inner.file = ack_payload_path
+    inner.to = args.to
+    inner.identity = args.identity
+    inner.receiver_aint = args.receiver_aint
+    inner.receiver_pubkey = args.receiver_pubkey
+    inner.surface_time = surface_time
+    inner.surface_context = surface_context
+    inner.surface_profile = surface_profile
+    inner.surface_priority = surface_priority
+    inner.transport = args.transport
+    inner.no_ains = args.no_ains
+    inner.no_http_auth = args.no_http_auth
+    inner.min_trust = args.min_trust
+    inner.dry_run = args.dry_run
+    inner.verbose = args.verbose
+
+    print(f"✓ ACK: {short_id} → {args.to}")
+    return _cmd_send(inner)
+
+
 def _cmd_send(args: argparse.Namespace) -> int:
     """Subcommand: pack a file as TBZ envelope and push to peer inbox.
 
@@ -514,6 +586,45 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Verbose SCP output",
     )
     p_send.set_defaults(func=_cmd_send)
+
+    # `tcd ack REF --to TARGET` — send signed ACK back
+    p_ack = sub.add_parser(
+        "ack",
+        help=(
+            "Send a signed ACK bundle referencing a prior arrival "
+            "(v0.5.8+)"
+        ),
+    )
+    p_ack.add_argument(
+        "ref",
+        help="Name of the bundle being acked (= filename or ID)",
+    )
+    p_ack.add_argument(
+        "--to",
+        required=True,
+        help="Target where the ACK should be delivered",
+    )
+    p_ack.add_argument(
+        "--note",
+        default=None,
+        help="Optional human-readable ACK note",
+    )
+    # Mirror the send-side flags so we reuse the same transport
+    for opt in [
+        "identity", "receiver-aint", "receiver-pubkey",
+        "surface-time", "surface-profile", "surface-priority",
+    ]:
+        flag = f"--{opt}"
+        p_ack.add_argument(flag, default=None)
+    p_ack.add_argument(
+        "--transport", choices=("scp", "http"), default="scp"
+    )
+    p_ack.add_argument("--no-ains", action="store_true")
+    p_ack.add_argument("--no-http-auth", action="store_true")
+    p_ack.add_argument("--min-trust", type=float, default=0.5)
+    p_ack.add_argument("--dry-run", action="store_true")
+    p_ack.add_argument("-v", "--verbose", action="store_true")
+    p_ack.set_defaults(func=_cmd_ack)
 
     args = parser.parse_args(argv)
 
