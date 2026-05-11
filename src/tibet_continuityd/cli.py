@@ -237,20 +237,35 @@ def _cmd_send(args: argparse.Namespace) -> int:
         rc = subprocess.run(init_cmd, capture_output=True)
         # init may fail if already exists; that's OK
 
-        # Pack the source into a sealed .tza bundle
-        pack_cmd = [
+        # Pack the source into a sealed .tza bundle.
+        # Surface-args are sandbox-version-only; PyPI 0.1.0 doesn't
+        # know them. Try with surface-args first; on
+        # "unrecognized arguments" retry without. SSM-name on the
+        # output path is preserved either way.
+        pack_cmd_base = [
             sys.executable, "-m", "tibet_drop", "pack",
             "--identity", str(identity_dir),
             "--receiver-aint", receiver_aint,
             "--receiver-pubkey", receiver_pubkey,
             "--input", str(src),
             "--output", str(bundle_out),
+        ]
+        pack_cmd_with_surface = pack_cmd_base + [
             "--surface-time", surface_time,
             "--surface-context", surface_context,
             "--surface-profile", surface_profile,
             "--surface-priority", surface_priority,
         ]
-        result = subprocess.run(pack_cmd, capture_output=True, text=True)
+        result = subprocess.run(
+            pack_cmd_with_surface, capture_output=True, text=True
+        )
+        if result.returncode != 0 and "unrecognized arguments" in result.stderr:
+            # Older tibet-drop on PyPI lacks surface-* flags.
+            # Retry without; the SSM filename on --output is enough
+            # for the receiver's sniff/SSM-routing stage.
+            result = subprocess.run(
+                pack_cmd_base, capture_output=True, text=True
+            )
         if result.returncode != 0:
             print(
                 f"ERROR: tibet_drop pack failed:\n{result.stderr}",
