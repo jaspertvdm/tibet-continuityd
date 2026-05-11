@@ -4,6 +4,8 @@ CLI entry-point for tibet-continuityd with subcommands.
   tcd run             # daemon mode (default — backwards-compat)
   tcd send FILE --to HOST:PATH
                       # push-mode: pack + scp to peer inbox
+  tcd send FILE --to jis:org:service@host
+                      # push-mode: identity-bound routing (v0.5.1+)
 
 Without subcommand, defaults to `run` (= existing v0.4.x behavior).
 """
@@ -17,7 +19,45 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
+
+
+def _resolve_jis_did(did: str) -> Tuple[str, str, str]:
+    """Resolve `jis:org:service@host` → (ssh_target, host, inbox_path).
+
+    Phase B convention-based parsing (v0.5.1).
+
+    Format: `jis:<org>:<service>@<host>`
+    Returns: ("root@<host>:<inbox>", "<host>", "<inbox>")
+
+    Defaults:
+        ssh user: from TIBET_AINS_SSH_USER env-var, else "root"
+        inbox:   from TIBET_AINS_DEFAULT_INBOX env-var,
+                 else "/var/lib/tibet/inbox"
+
+    Phase C (v0.5.2) will add AINS-API lookup for richer resolution
+    (= per-DID inbox path, public-key, transport-preference).
+    """
+    if not did.startswith("jis:"):
+        raise ValueError(
+            f"Not a JIS DID (must start with 'jis:'): {did}"
+        )
+    after_jis = did[4:]  # e.g. "humotica:continuityd@p520"
+    if "@" not in after_jis:
+        raise ValueError(
+            f"JIS DID missing '@host' suffix: {did}"
+        )
+    spec, host = after_jis.rsplit("@", 1)
+    if not host:
+        raise ValueError(f"Empty host in JIS DID: {did}")
+
+    ssh_user = os.environ.get("TIBET_AINS_SSH_USER", "root")
+    inbox = os.environ.get(
+        "TIBET_AINS_DEFAULT_INBOX",
+        "/var/lib/tibet/inbox",
+    )
+    ssh_target = f"{ssh_user}@{host}:{inbox}"
+    return ssh_target, host, inbox
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -45,11 +85,22 @@ def _cmd_send(args: argparse.Namespace) -> int:
         print(f"ERROR: source not found: {src}", file=sys.stderr)
         return 1
 
+    # Resolve target: JIS DID (v0.5.1+) or direct host:path (v0.5.0)
     target = args.to
-    if ":" not in target:
+    resolved_host = None
+    if target.startswith("jis:"):
+        try:
+            target, resolved_host, _inbox = _resolve_jis_did(target)
+            print(f"✓ resolved {args.to} → {target}")
+        except ValueError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+    elif ":" not in target:
         print(
-            "ERROR: --to must be <user@host>:<inbox-path> or "
-            "<host>:<inbox-path>",
+            "ERROR: --to must be one of:\n"
+            "  <user@host>:<inbox-path>   (direct SCP)\n"
+            "  <host>:<inbox-path>        (root user assumed)\n"
+            "  jis:<org>:<service>@<host>  (identity-bound, v0.5.1+)",
             file=sys.stderr,
         )
         return 1
