@@ -528,6 +528,48 @@ class ContinuityDaemon:
                     version=_ver,
                 )
                 self._http_server.start()
+
+        # v0.6.2: Optional tibet-mux consumer thread.
+        # Activates when TIBET_CONTINUITYD_MUX_SERVER + ..._MUX_AGENT
+        # are set. Polls the mux server for incoming frames addressed
+        # to us (= /api/mux/by-target), materializes payload.bundle_b64
+        # into the inbox, and lets the existing inotify-watcher pick
+        # them up via the normal Sniff/Verify/Seal pipeline.
+        self._mux_consumer = None
+        mux_server = os.environ.get(
+            "TIBET_CONTINUITYD_MUX_SERVER", ""
+        )
+        mux_agent = os.environ.get(
+            "TIBET_CONTINUITYD_MUX_AGENT", ""
+        )
+        if mux_server and mux_agent:
+            try:
+                from tibet_continuityd.mux_consumer import (
+                    MuxConsumerThread,
+                )
+                mux_intent = os.environ.get(
+                    "TIBET_CONTINUITYD_MUX_INTENT",
+                    "continuityd:inbox",
+                )
+                try:
+                    mux_interval = float(os.environ.get(
+                        "TIBET_CONTINUITYD_MUX_INTERVAL", "1.0"
+                    ))
+                except ValueError:
+                    mux_interval = 1.0
+                self._mux_consumer = MuxConsumerThread(
+                    server=mux_server,
+                    agent=mux_agent,
+                    inbox_dir=self.cfg.inbox,
+                    intent=mux_intent,
+                    interval=mux_interval,
+                )
+                self._mux_consumer.start()
+            except ImportError as e:
+                self.log.warning(
+                    f"mux-consumer requested but unavailable: {e}"
+                )
+
         self._install_signals()
 
         # Ensure inbox exists
@@ -577,6 +619,11 @@ class ContinuityDaemon:
         if self._http_server is not None:
             self._http_server.stop()
             self._http_server = None
+
+        # v0.6.2: stop mux-consumer thread on shutdown if started
+        if self._mux_consumer is not None:
+            self._mux_consumer.stop()
+            self._mux_consumer = None
 
         self.log.info(f"shutdown stats: {self._stats}")
         return 0
