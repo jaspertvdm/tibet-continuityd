@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tibet-continuityd"
-version = "0.5.2"
+version = "0.5.3"
 description = "Continuous integrity system daemon for the Distributed Continuity OS — Watch, Sniff, Coalesce, Verify, Fork, Trust, Seal, Police, Backpressure across 3 modes (passive/active/strict)."
 readme = "README.md"
 license = {text = "MIT"}

@@ -228,22 +228,69 @@ def _cmd_send(args: argparse.Namespace) -> int:
         print(f"✓ packed sealed envelope: {bundle_name}")
 
         if args.dry_run:
-            print(f"[dry-run] would scp {bundle_out} → {target}")
+            print(
+                f"[dry-run] would deliver {bundle_out} → {target}"
+                f" via {args.transport}"
+            )
             return 0
 
-        # SCP to target host inbox
-        scp_cmd = ["scp", str(bundle_out), f"{target}/"]
-        if args.verbose:
-            scp_cmd.insert(1, "-v")
-        result = subprocess.run(scp_cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            print(
-                f"ERROR: scp failed:\n{result.stderr}",
-                file=sys.stderr,
+        # Choose transport
+        if args.transport == "http":
+            # v0.5.3: HTTP POST to peer /inbox/<filename>.
+            # Target format: http://host:port  (port 8443 typical)
+            url_base = target.rstrip("/")
+            if not (url_base.startswith("http://")
+                    or url_base.startswith("https://")):
+                # Convert <host>:<port> to http:// default
+                url_base = f"http://{url_base}"
+            url = f"{url_base}/inbox/{bundle_name}"
+            try:
+                with open(bundle_out, "rb") as f:
+                    body = f.read()
+                req = urllib.request.Request(
+                    url,
+                    data=body,
+                    method="POST",
+                    headers={
+                        "Content-Type": "application/octet-stream",
+                        "Content-Length": str(len(body)),
+                    },
+                )
+                timeout = float(os.environ.get(
+                    "TIBET_HTTP_TIMEOUT", "10.0"
+                ))
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    status = resp.status
+                    resp_body = resp.read().decode("utf-8", errors="replace")
+                if status not in (200, 201):
+                    print(
+                        f"ERROR: HTTP {status}: {resp_body}",
+                        file=sys.stderr,
+                    )
+                    return 1
+                if args.verbose:
+                    print(f"  HTTP {status}: {resp_body.strip()}")
+            except (urllib.error.URLError, urllib.error.HTTPError,
+                    OSError) as e:
+                print(f"ERROR: HTTP delivery failed: {e}", file=sys.stderr)
+                return 1
+            print(f"✓ delivered via HTTP to {url}")
+        else:
+            # Default: SCP transport (= v0.5.0/0.5.1/0.5.2 path)
+            scp_cmd = ["scp", str(bundle_out), f"{target}/"]
+            if args.verbose:
+                scp_cmd.insert(1, "-v")
+            result = subprocess.run(
+                scp_cmd, capture_output=True, text=True
             )
-            return result.returncode
+            if result.returncode != 0:
+                print(
+                    f"ERROR: scp failed:\n{result.stderr}",
+                    file=sys.stderr,
+                )
+                return result.returncode
+            print(f"✓ delivered to {target}/{bundle_name}")
 
-        print(f"✓ delivered to {target}/{bundle_name}")
         print(
             f"  peer continuityd will sniff + verify + seal "
             f"on arrival"
@@ -322,6 +369,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--surface-priority",
         default=None,
         help="Visible surface priority (default: normal)",
+    )
+    p_send.add_argument(
+        "--transport",
+        choices=("scp", "http"),
+        default="scp",
+        help=(
+            "Transport mechanism. 'scp' (default, SSH over 22) or "
+            "'http' (POST to peer /inbox on port 8443 typically, "
+            "firewall-friendly via 443 reverse-proxy). v0.5.3+"
+        ),
     )
     p_send.add_argument(
         "--no-ains",

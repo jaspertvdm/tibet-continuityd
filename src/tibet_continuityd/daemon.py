@@ -504,6 +504,30 @@ class ContinuityDaemon:
             f"(mode={self.cfg.mode}, actor={self._actor_id}, "
             f"inbox={self.cfg.inbox})"
         )
+
+        # v0.5.3 Optional HTTP inbox listener — special-purpose port
+        # for cross-host transport over firewall-friendly HTTP.
+        # Default OFF (= env-var TIBET_CONTINUITYD_HTTP_PORT to enable).
+        # Future v0.5.4+ will bridge to tibet-mux for universal :443.
+        self._http_server = None
+        http_port_str = os.environ.get("TIBET_CONTINUITYD_HTTP_PORT", "")
+        if http_port_str:
+            try:
+                http_port = int(http_port_str)
+            except ValueError:
+                http_port = 0
+            if http_port > 0:
+                from tibet_continuityd.inbox_http import InboxHTTPServer
+                http_host = os.environ.get(
+                    "TIBET_CONTINUITYD_HTTP_HOST", "0.0.0.0"
+                )
+                self._http_server = InboxHTTPServer(
+                    inbox_dir=self.cfg.inbox,
+                    port=http_port,
+                    host=http_host,
+                    version=_ver,
+                )
+                self._http_server.start()
         self._install_signals()
 
         # Ensure inbox exists
@@ -548,6 +572,11 @@ class ContinuityDaemon:
                 _flush_settled()
 
             _flush_settled()
+
+        # v0.5.3: stop HTTP inbox listener on shutdown if started
+        if self._http_server is not None:
+            self._http_server.stop()
+            self._http_server = None
 
         self.log.info(f"shutdown stats: {self._stats}")
         return 0
