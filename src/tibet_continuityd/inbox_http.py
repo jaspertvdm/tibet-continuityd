@@ -50,6 +50,53 @@ from typing import Optional
 _log = logging.getLogger("tibet_continuityd.inbox_http")
 
 
+def _ains_lookup_pubkey(
+    sender_did: str, timeout: float = 3.0
+) -> Optional[str]:
+    """Look up the AINS record for a JIS DID's host segment,
+    returning the registered public_key hex if available.
+
+    sender_did format: jis:<org>:<service>@<host>
+    AINS lookup is performed on <host>.
+
+    Returns None on any failure (= API down, no record, no pubkey).
+    """
+    if not sender_did.startswith("jis:"):
+        return None
+    after = sender_did[4:]
+    if "@" not in after:
+        return None
+    _, host = after.rsplit("@", 1)
+    if not host:
+        return None
+    api_url = os.environ.get(
+        "TIBET_AINS_API_URL",
+        "https://brein.jaspervandemeent.nl/api/ains/resolve",
+    )
+    import json as _json
+    import urllib.error as _err
+    import urllib.request as _req
+    try:
+        timeout = float(os.environ.get(
+            "TIBET_AINS_API_TIMEOUT", str(timeout)))
+    except ValueError:
+        pass
+    url = f"{api_url.rstrip('/')}/{host}"
+    try:
+        with _req.urlopen(url, timeout=timeout) as resp:
+            if resp.status != 200:
+                return None
+            data = _json.loads(resp.read().decode("utf-8"))
+            if data.get("status") != "found":
+                return None
+            rec = data.get("record") or {}
+            pk = rec.get("public_key")
+            return pk if isinstance(pk, str) else None
+    except (_err.URLError, _err.HTTPError, _json.JSONDecodeError,
+            TimeoutError, OSError):
+        return None
+
+
 def _verify_auth_header(
     auth_value: str, body: bytes
 ) -> Optional[tuple[str, bool]]:
@@ -189,6 +236,45 @@ def _make_handler(inbox_dir: Path, version: str = "?"):
             auth_result = None
             if auth_value:
                 auth_result = _verify_auth_header(auth_value, body)
+
+            # v0.5.5 Optional AINS pubkey-pinning.
+            # If sender claims a JIS DID via X-TIBET-Sender-DID and
+            # AINS has a record with public_key, the Authorization
+            # pubkey MUST match. Behavior controlled by
+            # TIBET_HTTP_REQUIRE_AINS_PIN (=1 strict, else warn+accept).
+            sender_claim = self.headers.get("X-TIBET-Sender-DID", "")
+            pin_status = "no-claim"
+            pin_ok = True
+            if sender_claim and auth_result:
+                ains_pk = _ains_lookup_pubkey(sender_claim)
+                if ains_pk:
+                    if ains_pk.lower() == auth_result[0].lower():
+                        pin_status = f"pinned-by-AINS({sender_claim})"
+                    else:
+                        pin_status = (
+                            f"AINS-PIN-MISMATCH "
+                            f"claim={sender_claim} "
+                            f"got={auth_result[0][:16]}... "
+                            f"want={ains_pk[:16]}..."
+                        )
+                        pin_ok = False
+                else:
+                    pin_status = (
+                        f"claim={sender_claim} (no AINS record)"
+                    )
+
+            require_pin = os.environ.get(
+                "TIBET_HTTP_REQUIRE_AINS_PIN", "0"
+            ) in ("1", "true", "yes")
+            if require_pin and not pin_ok:
+                _log.warning(
+                    f"http-inbox: 401 AINS-pin failed for {filename}: "
+                    f"{pin_status}"
+                )
+                self.send_response(401)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if require_auth and (auth_result is None
                                   or not auth_result[1]):
                 _log.warning(
@@ -204,7 +290,8 @@ def _make_handler(inbox_dir: Path, version: str = "?"):
                 pk_short = auth_result[0][:16] + "..."
                 in_allow = auth_result[1]
                 auth_status = (
-                    f"signed-by={pk_short} allowed={in_allow}"
+                    f"signed-by={pk_short} allowed={in_allow} "
+                    f"{pin_status}"
                 )
 
             # Write atomically: <name>.part → rename

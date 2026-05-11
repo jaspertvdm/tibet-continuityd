@@ -295,6 +295,11 @@ def _cmd_send(args: argparse.Namespace) -> int:
                         http_headers["Authorization"] = auth
                         if args.verbose:
                             print(f"  signed HTTP request: {auth[:60]}...")
+                # v0.5.5: send identity claim if --to was a JIS DID.
+                # Daemon can AINS-lookup this claim and pin the
+                # Authorization pubkey against record.public_key.
+                if args.to.startswith("jis:"):
+                    http_headers["X-TIBET-Sender-DID"] = args.to
                 req = urllib.request.Request(
                     url,
                     data=body,
