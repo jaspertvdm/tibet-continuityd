@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tibet-continuityd"
-version = "0.6.4"
+version = "0.6.5"
 description = "Continuity daemon and sealed handoff tool — watch, sniff, verify, triage, reseal, police, and send continuity-bearing TBZ objects across local and cross-host lanes."
 readme = "README.md"
 license = {text = "MIT"}
@@ -44,7 +44,7 @@ dependencies = []
 # Verify + Fork + Seal stages with cryptographic discipline.
 # tibet-drop covers TBZ pack/verify primitives.
 verify = [
-    "tibet-drop>=0.2.0",
+    "tibet-drop>=0.2.1",
 ]
 # ICC bridge integration via tibet-phantom (Identity-Bound
 # Continuity Container). Installs phantom + drop together.
@@ -58,7 +58,7 @@ mux = [
 ]
 # Full stack: verify + phantom + extra crypto/cbor primitives.
 full = [
-    "tibet-drop>=0.2.0",
+    "tibet-drop>=0.2.1",
     "tibet-phantom[icc]>=0.2.1",
     "cryptography>=41.0",
     "cbor2>=5.4",
