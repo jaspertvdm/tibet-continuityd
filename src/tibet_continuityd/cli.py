@@ -12,14 +12,50 @@ Without subcommand, defaults to `run` (= existing v0.4.x behavior).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Optional, Tuple
+
+
+_DEFAULT_AINS_API = "https://brein.jaspervandemeent.nl/api/ains/resolve"
+
+
+def _ains_lookup(name: str, timeout: float = 3.0) -> Optional[dict]:
+    """Look up a name via the AINS resolve API.
+
+    Returns the AINS record dict (`{"status", "domain", "record", ...}`)
+    on success, or None if the API is unavailable / no record exists.
+
+    Configurable via:
+        TIBET_AINS_API_URL    (default: brein.jaspervandemeent.nl)
+        TIBET_AINS_API_TIMEOUT (default: 3.0 seconds)
+    """
+    api_url = os.environ.get("TIBET_AINS_API_URL", _DEFAULT_AINS_API)
+    try:
+        timeout = float(os.environ.get(
+            "TIBET_AINS_API_TIMEOUT", str(timeout)))
+    except ValueError:
+        pass
+    url = f"{api_url.rstrip('/')}/{name}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            if resp.status != 200:
+                return None
+            data = json.loads(resp.read().decode("utf-8"))
+            if data.get("status") != "found":
+                return None
+            return data
+    except (urllib.error.URLError, urllib.error.HTTPError,
+            json.JSONDecodeError, TimeoutError, OSError):
+        return None
 
 
 def _resolve_jis_did(did: str) -> Tuple[str, str, str]:
@@ -95,6 +131,35 @@ def _cmd_send(args: argparse.Namespace) -> int:
         except ValueError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
+
+        # v0.5.2: optional AINS API identity verification.
+        # Lookup the @<host> part as AINS name (e.g. "root_idd").
+        # On hit: print trust_score + capabilities for transparency.
+        # On miss or API down: continue silently (= graceful fallback).
+        if not args.no_ains and resolved_host:
+            ains = _ains_lookup(resolved_host)
+            if ains:
+                rec = ains.get("record", {})
+                trust = rec.get("trust_score")
+                caps = rec.get("capabilities") or []
+                domain = ains.get("domain", resolved_host)
+                print(
+                    f"✓ AINS verified: domain={domain} "
+                    f"trust={trust} caps={','.join(caps[:4])}"
+                    + ("..." if len(caps) > 4 else "")
+                )
+                if trust is not None and trust < args.min_trust:
+                    print(
+                        f"ERROR: AINS trust_score {trust} below "
+                        f"--min-trust {args.min_trust}",
+                        file=sys.stderr,
+                    )
+                    return 1
+            elif args.verbose:
+                print(
+                    f"  (AINS lookup for {resolved_host}: no record / "
+                    f"API unavailable — continuing via convention)"
+                )
     elif ":" not in target:
         print(
             "ERROR: --to must be one of:\n"
@@ -257,6 +322,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--surface-priority",
         default=None,
         help="Visible surface priority (default: normal)",
+    )
+    p_send.add_argument(
+        "--no-ains",
+        action="store_true",
+        help="Skip AINS API identity lookup (v0.5.2+)",
+    )
+    p_send.add_argument(
+        "--min-trust",
+        type=float,
+        default=0.5,
+        help=(
+            "Minimum AINS trust_score to allow send "
+            "(default: 0.5; only enforced when AINS-record found)"
+        ),
     )
     p_send.add_argument(
         "--dry-run",
