@@ -478,7 +478,64 @@ def _cmd_send(args: argparse.Namespace) -> int:
             return 0
 
         # Choose transport
-        if args.transport == "http":
+        if args.transport == "mux":
+            # v0.6.0: route bundle via tibet-mux multiplexer.
+            # Single port (= 443 in prod) carrying many intents.
+            try:
+                from tibet_mux.client import MuxClient  # type: ignore
+            except ImportError:
+                print(
+                    "ERROR: --transport mux requires tibet-mux.\n"
+                    "  pip install tibet-continuityd[mux]\n"
+                    "  or:  pip install tibet-mux",
+                    file=sys.stderr,
+                )
+                return 1
+            mux_server = args.mux_server or os.environ.get(
+                "TIBET_MUX_SERVER", "http://localhost:8000"
+            )
+            target_agent = args.mux_target or (
+                resolved_host or "self"
+            )
+            intent = args.mux_intent or "continuityd:inbox"
+            sender_agent = args.mux_agent or os.environ.get(
+                "TIBET_MUX_AGENT", "tcd-sender"
+            )
+            with open(bundle_out, "rb") as f:
+                body = f.read()
+            import base64 as _b64
+            payload = {
+                "bundle_b64": _b64.b64encode(body).decode("ascii"),
+                "name": bundle_name,
+                "size_bytes": len(body),
+            }
+            try:
+                client = MuxClient(mux_server, sender_agent)
+                ch = client.open(
+                    target=target_agent,
+                    intent=intent,
+                    metadata={"continuityd_version": "0.6.0"},
+                )
+                ch_id = ch.get("channel_id") or ch.get("id")
+                if not ch_id:
+                    print(
+                        f"ERROR: mux.open returned no channel_id: {ch}",
+                        file=sys.stderr,
+                    )
+                    return 1
+                client.send(ch_id, payload)
+                client.close(ch_id, reason="continuityd_send_done")
+            except Exception as e:
+                print(
+                    f"ERROR: mux transport failed: {e}",
+                    file=sys.stderr,
+                )
+                return 1
+            print(
+                f"✓ delivered via mux to {mux_server} "
+                f"intent={intent} target={target_agent}"
+            )
+        elif args.transport == "http":
             # v0.5.3: HTTP POST to peer /inbox/<filename>.
             # Target format: http://host:port  (port 8443 typical)
             url_base = target.rstrip("/")
@@ -632,13 +689,35 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     p_send.add_argument(
         "--transport",
-        choices=("scp", "http"),
+        choices=("scp", "http", "mux"),
         default="scp",
         help=(
-            "Transport mechanism. 'scp' (default, SSH over 22) or "
-            "'http' (POST to peer /inbox on port 8443 typically, "
-            "firewall-friendly via 443 reverse-proxy). v0.5.3+"
+            "Transport: 'scp' (SSH/22), 'http' (POST to peer /inbox), "
+            "or 'mux' (tibet-mux multiplexer, single-port). v0.6+"
         ),
+    )
+    p_send.add_argument(
+        "--mux-server",
+        default=None,
+        help="tibet-mux base URL (default: TIBET_MUX_SERVER env or "
+             "http://localhost:8000)",
+    )
+    p_send.add_argument(
+        "--mux-target",
+        default=None,
+        help="Target agent name for mux channel (default: host from "
+             "JIS DID, else 'self')",
+    )
+    p_send.add_argument(
+        "--mux-intent",
+        default=None,
+        help="Mux intent (default: continuityd:inbox)",
+    )
+    p_send.add_argument(
+        "--mux-agent",
+        default=None,
+        help="Sender agent name (default: TIBET_MUX_AGENT env or "
+             "'tcd-sender')",
     )
     p_send.add_argument(
         "--no-ains",
