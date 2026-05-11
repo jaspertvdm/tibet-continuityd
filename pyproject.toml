@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tibet-continuityd"
-version = "0.5.3"
-description = "Continuous integrity system daemon for the Distributed Continuity OS — Watch, Sniff, Coalesce, Verify, Fork, Trust, Seal, Police, Backpressure across 3 modes (passive/active/strict)."
+version = "0.5.4"
+description = "Continuity daemon and sealed handoff tool — watch, sniff, verify, triage, reseal, police, and send continuity-bearing TBZ objects across local and cross-host lanes."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"

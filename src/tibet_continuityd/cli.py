@@ -28,6 +28,39 @@ from typing import Optional, Tuple
 _DEFAULT_AINS_API = "https://brein.jaspervandemeent.nl/api/ains/resolve"
 
 
+def _compute_http_auth_header(
+    identity_dir: Path, body_bytes: bytes
+) -> Optional[str]:
+    """Sign (sha256(body) + timestamp) with identity for HTTP auth.
+
+    Returns Authorization header value, or None if signing fails
+    (= tibet-drop unavailable, identity dir invalid, etc.).
+
+    Header format (v1):
+        TIBET-SIG-V1 <pubkey-hex>:<iso-timestamp>:<sig-hex>
+    """
+    try:
+        from tibet_drop.crypto import sha256, IdentityKey  # type: ignore
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+    except ImportError:
+        return None
+    try:
+        priv_bytes = (identity_dir / "identity.priv").read_bytes()
+        priv = ed25519.Ed25519PrivateKey.from_private_bytes(priv_bytes)
+        signer = IdentityKey(priv=priv, pub=priv.public_key())
+    except Exception:
+        return None
+
+    timestamp_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    body_hash = sha256(body_bytes)
+    msg = body_hash + timestamp_iso.encode("utf-8")
+    sig = signer.sign(msg)
+    pubkey_hex = signer.pub_bytes().hex()
+    sig_hex = sig.hex()
+    # Separator '|' to avoid collision with ':' in timestamp_iso.
+    return f"TIBET-SIG-V1 {pubkey_hex}|{timestamp_iso}|{sig_hex}"
+
+
 def _ains_lookup(name: str, timeout: float = 3.0) -> Optional[dict]:
     """Look up a name via the AINS resolve API.
 
@@ -247,14 +280,26 @@ def _cmd_send(args: argparse.Namespace) -> int:
             try:
                 with open(bundle_out, "rb") as f:
                     body = f.read()
+                http_headers = {
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": str(len(body)),
+                }
+                # v0.5.4: sign request with same identity that signed
+                # the TBZ bundle. Header proves "same actor that
+                # packed this is delivering it RIGHT NOW".
+                if not args.no_http_auth:
+                    auth = _compute_http_auth_header(
+                        Path(identity_dir), body
+                    )
+                    if auth:
+                        http_headers["Authorization"] = auth
+                        if args.verbose:
+                            print(f"  signed HTTP request: {auth[:60]}...")
                 req = urllib.request.Request(
                     url,
                     data=body,
                     method="POST",
-                    headers={
-                        "Content-Type": "application/octet-stream",
-                        "Content-Length": str(len(body)),
-                    },
+                    headers=http_headers,
                 )
                 timeout = float(os.environ.get(
                     "TIBET_HTTP_TIMEOUT", "10.0"
@@ -384,6 +429,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--no-ains",
         action="store_true",
         help="Skip AINS API identity lookup (v0.5.2+)",
+    )
+    p_send.add_argument(
+        "--no-http-auth",
+        action="store_true",
+        help="Skip JIS-DID auth header on HTTP transport (v0.5.4+)",
     )
     p_send.add_argument(
         "--min-trust",

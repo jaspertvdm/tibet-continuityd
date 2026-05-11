@@ -37,14 +37,92 @@ Usage:
 """
 from __future__ import annotations
 
+import calendar
 import logging
+import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
 
 
 _log = logging.getLogger("tibet_continuityd.inbox_http")
+
+
+def _verify_auth_header(
+    auth_value: str, body: bytes
+) -> Optional[tuple[str, bool]]:
+    """Verify TIBET-SIG-V1 Authorization header.
+
+    Returns (pubkey_hex, in_allowlist) on success, None on failure.
+    Replay-window via TIBET_HTTP_MAX_SIG_AGE_SEC (default 300).
+    Optional allowlist via TIBET_HTTP_TRUSTED_PUBKEYS (comma-sep hex).
+    """
+    if not auth_value.startswith("TIBET-SIG-V1 "):
+        return None
+    payload = auth_value[len("TIBET-SIG-V1 "):]
+    # v0.5.4: separator is '|' (not ':') to avoid collision
+    # with ':' inside timestamp_iso. Older messages used ':'.
+    if "|" in payload:
+        parts = payload.split("|", 2)
+    else:
+        # Backwards-compat: split timestamp recombined
+        raw = payload.split(":")
+        if len(raw) >= 5:
+            parts = [raw[0], ":".join(raw[1:-1]), raw[-1]]
+        else:
+            parts = raw
+    if len(parts) != 3:
+        return None
+    pubkey_hex, ts_iso, sig_hex = parts
+
+    # Replay window check
+    try:
+        max_age = int(os.environ.get(
+            "TIBET_HTTP_MAX_SIG_AGE_SEC", "300"
+        ))
+    except ValueError:
+        max_age = 300
+    try:
+        ts = calendar.timegm(time.strptime(ts_iso, "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, TypeError):
+        return None
+    now = time.time()
+    if abs(now - ts) > max_age:
+        _log.warning(
+            f"http-auth: timestamp out of window ({abs(now-ts):.0f}s "
+            f"> {max_age}s)"
+        )
+        return None
+
+    # Signature verification — requires tibet-drop crypto
+    try:
+        from tibet_drop.crypto import sha256, verify_signature  # type: ignore
+    except ImportError:
+        _log.warning(
+            "http-auth: tibet-drop unavailable, skipping verification"
+        )
+        return None
+    try:
+        pubkey = bytes.fromhex(pubkey_hex)
+        sig = bytes.fromhex(sig_hex)
+    except ValueError:
+        return None
+    body_hash = sha256(body)
+    msg = body_hash + ts_iso.encode("utf-8")
+    if not verify_signature(pubkey, msg, sig):
+        return None
+
+    # Optional allowlist
+    allowlist_env = os.environ.get("TIBET_HTTP_TRUSTED_PUBKEYS", "")
+    allowlist = {
+        k.strip().lower()
+        for k in allowlist_env.split(",")
+        if k.strip()
+    }
+    in_allow = pubkey_hex.lower() in allowlist if allowlist else True
+    return pubkey_hex, in_allow
 
 
 def _make_handler(inbox_dir: Path, version: str = "?"):
@@ -96,6 +174,39 @@ def _make_handler(inbox_dir: Path, version: str = "?"):
                 self.end_headers()
                 return
             body = self.rfile.read(length)
+
+            # v0.5.4 Optional JIS-DID auth verification.
+            _log.debug(
+                f"http-inbox headers received: "
+                f"{dict(self.headers).keys()}"
+            )
+            # If TIBET_HTTP_REQUIRE_AUTH=1: reject 401 on fail.
+            # If not required: log success/failure, accept either way.
+            auth_value = self.headers.get("Authorization", "")
+            require_auth = os.environ.get(
+                "TIBET_HTTP_REQUIRE_AUTH", "0"
+            ) in ("1", "true", "yes")
+            auth_result = None
+            if auth_value:
+                auth_result = _verify_auth_header(auth_value, body)
+            if require_auth and (auth_result is None
+                                  or not auth_result[1]):
+                _log.warning(
+                    f"http-inbox: 401 unauthorized for {filename} "
+                    f"(auth_result={auth_result})"
+                )
+                self.send_response(401)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            auth_status = "no-auth"
+            if auth_result:
+                pk_short = auth_result[0][:16] + "..."
+                in_allow = auth_result[1]
+                auth_status = (
+                    f"signed-by={pk_short} allowed={in_allow}"
+                )
+
             # Write atomically: <name>.part → rename
             part = inbox_dir / (filename + ".part")
             final = inbox_dir / filename
@@ -104,10 +215,14 @@ def _make_handler(inbox_dir: Path, version: str = "?"):
             part.rename(final)
             _log.info(
                 f"http-inbox: received {filename} "
-                f"({length} bytes) from {self.address_string()}"
+                f"({length} bytes) from {self.address_string()} "
+                f"[{auth_status}]"
             )
             self.send_response(201)
-            resp = f"created {filename} ({length} bytes)\n".encode()
+            resp = (
+                f"created {filename} ({length} bytes) "
+                f"[{auth_status}]\n"
+            ).encode()
             self.send_header("Content-Type", "text/plain")
             self.send_header("Content-Length", str(len(resp)))
             self.end_headers()

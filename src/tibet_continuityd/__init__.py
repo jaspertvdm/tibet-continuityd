@@ -26,7 +26,7 @@ Plus: /srv/jtel-stack/hersenspinsels/tibet-continuity-guardian.md
                                 — Codex, 9 mei 2026
 """
 
-__version__ = "0.5.3"
+__version__ = "0.5.4"
 __author__ = "Jasper van de Meent, Root AI, Codex"
 
 # Core stages — pure stdlib, always available
