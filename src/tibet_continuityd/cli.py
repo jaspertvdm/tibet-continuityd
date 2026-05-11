@@ -166,6 +166,90 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return daemon_main()
 
 
+def _cmd_recv(args: argparse.Namespace) -> int:
+    """Subcommand: ephemeral HTTP listener for one or more arrivals.
+
+    Phase D step 2 (v0.5.9): bidirectional roundtrip primitive.
+
+    Spawns an InboxHTTPServer in the foreground for N seconds (or
+    until --count arrivals received). Prints a JSON summary line
+    per arrival. Useful from a laptop/smartphone-grade host that
+    wants to receive ONE ACK without running a permanent daemon.
+
+    Note: auth verification follows the same rules as the daemon
+    (TIBET_HTTP_REQUIRE_AUTH, TIBET_HTTP_REQUIRE_AINS_PIN env-vars
+    apply).
+    """
+    import json as _json
+    import time as _time
+    from tibet_continuityd import __version__ as _ver
+    from tibet_continuityd.inbox_http import InboxHTTPServer
+
+    if args.inbox:
+        inbox_dir = Path(args.inbox).resolve()
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+        ephemeral_dir = False
+    else:
+        inbox_dir = Path(tempfile.mkdtemp(prefix="tcd-recv-"))
+        ephemeral_dir = True
+
+    print(
+        f"tcd recv v{_ver} listening on "
+        f"http://{args.host}:{args.port}/inbox/"
+    )
+    print(f"  inbox:   {inbox_dir}")
+    print(f"  wait:    {args.wait}s")
+    print(f"  count:   {args.count}")
+    print(f"  ctrl-c to abort")
+    print()
+
+    server = InboxHTTPServer(
+        inbox_dir=inbox_dir,
+        port=args.port,
+        host=args.host,
+        version=_ver,
+    )
+    server.start()
+
+    deadline = _time.monotonic() + args.wait
+    seen: set = set()
+    received_count = 0
+    rc = 0
+    try:
+        while _time.monotonic() < deadline:
+            files = sorted(inbox_dir.glob("*.tza"))
+            for f in files:
+                if f.name in seen:
+                    continue
+                seen.add(f.name)
+                received_count += 1
+                summary = {
+                    "name": f.name,
+                    "size_bytes": f.stat().st_size,
+                    "received_at": _time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", _time.gmtime()
+                    ),
+                }
+                print(f"✓ received: {_json.dumps(summary)}")
+                if received_count >= args.count:
+                    break
+            if received_count >= args.count:
+                break
+            _time.sleep(0.5)
+        if received_count == 0:
+            print(f"(no arrivals in {args.wait}s window)")
+            rc = 2
+    except KeyboardInterrupt:
+        print("(aborted by user)")
+        rc = 130
+    finally:
+        server.stop()
+        if ephemeral_dir and not args.keep_inbox:
+            shutil.rmtree(inbox_dir, ignore_errors=True)
+
+    return rc
+
+
 def _cmd_ack(args: argparse.Namespace) -> int:
     """Subcommand: send a signed ACK bundle referencing a prior event.
 
@@ -625,6 +709,40 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_ack.add_argument("--dry-run", action="store_true")
     p_ack.add_argument("-v", "--verbose", action="store_true")
     p_ack.set_defaults(func=_cmd_ack)
+
+    # `tcd recv --port 8443 --wait 60` — ephemeral HTTP listener
+    p_recv = sub.add_parser(
+        "recv",
+        help=(
+            "Ephemeral HTTP listener — receive 1 or more arrivals "
+            "then exit (v0.5.9+)"
+        ),
+    )
+    p_recv.add_argument(
+        "--port", type=int, default=8443,
+        help="HTTP port to listen on (default 8443)",
+    )
+    p_recv.add_argument(
+        "--host", default="0.0.0.0",
+        help="Bind address (default 0.0.0.0)",
+    )
+    p_recv.add_argument(
+        "--wait", type=int, default=60,
+        help="Maximum seconds to wait for arrival(s) (default 60)",
+    )
+    p_recv.add_argument(
+        "--count", type=int, default=1,
+        help="Number of arrivals to wait for (default 1)",
+    )
+    p_recv.add_argument(
+        "--inbox", default=None,
+        help="Inbox directory (default: ephemeral temp dir)",
+    )
+    p_recv.add_argument(
+        "--keep-inbox", action="store_true",
+        help="Keep inbox dir after exit (default: clean up ephemeral)",
+    )
+    p_recv.set_defaults(func=_cmd_recv)
 
     args = parser.parse_args(argv)
 
