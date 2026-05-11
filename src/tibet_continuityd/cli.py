@@ -129,6 +129,37 @@ def _resolve_jis_did(did: str) -> Tuple[str, str, str]:
     return ssh_target, host, inbox
 
 
+def _resolve_jis_to_url(did: str, default_port: int = 8443) -> Tuple[str, str]:
+    """Resolve `jis:org:service@host` → (url, host) for HTTP transport.
+
+    Phase C step 4 (v0.5.7): identity-bound URL routing.
+
+    Format: `jis:<org>:<service>@<host>` (= same DID format)
+    Returns: ("http://<host>:<port>", "<host>")
+
+    Defaults:
+        port: from TIBET_HTTP_PORT env-var, else 8443
+    """
+    if not did.startswith("jis:"):
+        raise ValueError(
+            f"Not a JIS DID (must start with 'jis:'): {did}"
+        )
+    after_jis = did[4:]
+    if "@" not in after_jis:
+        raise ValueError(
+            f"JIS DID missing '@host' suffix: {did}"
+        )
+    _spec, host = after_jis.rsplit("@", 1)
+    if not host:
+        raise ValueError(f"Empty host in JIS DID: {did}")
+    try:
+        port = int(os.environ.get("TIBET_HTTP_PORT", str(default_port)))
+    except ValueError:
+        port = default_port
+    url = f"http://{host}:{port}"
+    return url, host
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     """Subcommand: run daemon (= existing v0.4 behavior)."""
     from tibet_continuityd.daemon import main as daemon_main
@@ -157,7 +188,15 @@ def _cmd_send(args: argparse.Namespace) -> int:
     # Resolve target: JIS DID (v0.5.1+) or direct host:path (v0.5.0)
     target = args.to
     resolved_host = None
-    if target.startswith("jis:"):
+    # v0.5.7: JIS DID with HTTP transport → URL form
+    if target.startswith("jis:") and args.transport == "http":
+        try:
+            target, resolved_host = _resolve_jis_to_url(target)
+            print(f"✓ resolved {args.to} → {target} (HTTP transport)")
+        except ValueError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+    elif target.startswith("jis:"):
         try:
             target, resolved_host, _inbox = _resolve_jis_did(target)
             print(f"✓ resolved {args.to} → {target}")
