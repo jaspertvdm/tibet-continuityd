@@ -166,6 +166,170 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return daemon_main()
 
 
+def _cmd_mux_consumer(args: argparse.Namespace) -> int:
+    """Subcommand: poll tibet-mux server for incoming frames and
+    materialize them as files in the local inbox.
+
+    Phase E step 2 (v0.6.1): mux receiver-side bridge.
+
+    Loop:
+        1. GET /api/mux/channels?agent=<me>
+        2. For each channel where target matches and intent matches,
+           GET /api/mux/channel/{id} → recent_frames
+        3. For each frame not yet seen (track via channel_id + seq):
+           a. Decode payload (expects {bundle_b64, name, size_bytes}).
+           b. Write inbox/<name>.part atomically, then rename.
+        4. Sleep --interval seconds; repeat until --duration elapsed
+           or Ctrl-C.
+
+    The continuityd daemon (running separately, watching this inbox)
+    will pick up the new file via inotify and run its
+    Watch/Sniff/Verify/Seal pipeline as for any other arrival.
+    """
+    try:
+        from tibet_mux.client import MuxClient  # type: ignore
+    except ImportError:
+        print(
+            "ERROR: tcd mux-consumer requires tibet-mux.\n"
+            "  pip install tibet-continuityd[mux]",
+            file=sys.stderr,
+        )
+        return 1
+
+    import base64 as _b64
+    import time as _time
+
+    server = args.server or os.environ.get(
+        "TIBET_MUX_SERVER", "http://localhost:8000"
+    )
+    agent = args.agent
+    intent_filter = args.intent or "continuityd:inbox"
+    inbox = Path(args.inbox).resolve()
+    inbox.mkdir(parents=True, exist_ok=True)
+
+    client = MuxClient(server, agent)
+
+    print(
+        f"tcd mux-consumer listening on {server} "
+        f"as agent={agent} intent={intent_filter}"
+    )
+    print(f"  inbox:    {inbox}")
+    print(f"  interval: {args.interval}s")
+    print(f"  duration: {args.duration}s (0 = forever)")
+    print(f"  ctrl-c to stop")
+    print()
+
+    seen: set = set()  # (channel_id, seq) pairs
+    received = 0
+    start = _time.monotonic()
+    rc = 0
+    try:
+        while True:
+            if args.duration and (
+                _time.monotonic() - start >= args.duration
+            ):
+                break
+            try:
+                # v0.6.1: use /by-target endpoint (tibet-mux v1.0.1+)
+                # because core mux indexes _agent_channels by SENDER,
+                # so calling client.channels(agent=us) as the receiver
+                # returns nothing. /by-target?target=us iterates all
+                # channels in core._channels and filters by ch.target.
+                import urllib.request as _ureq
+                import urllib.parse as _uparse
+                import json as _json
+                q = _uparse.urlencode({
+                    "target": agent,
+                    "intent": intent_filter or "",
+                    "include_closed": "true",
+                })
+                url = (
+                    server.rstrip("/")
+                    + "/api/mux/by-target?" + q
+                )
+                with _ureq.urlopen(url, timeout=3.0) as resp:
+                    chans_resp = _json.loads(
+                        resp.read().decode("utf-8")
+                    )
+                chans = chans_resp.get("channels", []) or []
+            except Exception as e:
+                if args.verbose:
+                    print(f"  poll error: {e}")
+                _time.sleep(args.interval)
+                continue
+
+            for c in chans:
+                ch_id = c.get("id") or c.get("channel_id")
+                if not ch_id:
+                    continue
+                if intent_filter and c.get("intent") != intent_filter:
+                    continue
+                # /by-target already filters by target — extra guard
+                if c.get("target") and c.get("target") != agent.lower():
+                    continue
+                try:
+                    detail = client.channel(ch_id)
+                except Exception as e:
+                    if args.verbose:
+                        print(f"  channel-fetch error {ch_id}: {e}")
+                    continue
+                frames = detail.get("recent_frames", []) or []
+                for frame in frames:
+                    seq = frame.get("seq")
+                    key = (ch_id, seq)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    payload = frame.get("payload") or {}
+                    if not isinstance(payload, dict):
+                        continue
+                    name = payload.get("name")
+                    body_b64 = payload.get("bundle_b64")
+                    if not name or not body_b64:
+                        continue
+                    try:
+                        body = _b64.b64decode(body_b64)
+                    except Exception:
+                        continue
+                    # Path safety
+                    if "/" in name or "\\" in name or ".." in name:
+                        if args.verbose:
+                            print(f"  reject unsafe name: {name}")
+                        continue
+                    part = inbox / (name + ".part")
+                    final = inbox / name
+                    part.write_bytes(body)
+                    part.rename(final)
+                    received += 1
+                    print(
+                        f"✓ materialized: name={name} "
+                        f"size={len(body)} channel={ch_id} seq={seq}"
+                    )
+                    # Close channel after successful materialize.
+                    try:
+                        client.close(
+                            ch_id, reason="consumer_received"
+                        )
+                    except Exception as e:
+                        if args.verbose:
+                            print(
+                                f"  warn: close({ch_id}) failed: {e}"
+                            )
+                    if args.count and received >= args.count:
+                        break
+                if args.count and received >= args.count:
+                    break
+            if args.count and received >= args.count:
+                break
+            _time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print("(aborted by user)")
+        rc = 130
+
+    print(f"tcd mux-consumer done. received={received}")
+    return rc
+
+
 def _cmd_recv(args: argparse.Namespace) -> int:
     """Subcommand: ephemeral HTTP listener for one or more arrivals.
 
@@ -524,7 +688,20 @@ def _cmd_send(args: argparse.Namespace) -> int:
                     )
                     return 1
                 client.send(ch_id, payload)
-                client.close(ch_id, reason="continuityd_send_done")
+                if args.mux_keep_open:
+                    # v0.6.1: leave channel open so consumer can
+                    # poll, fetch recent_frames, materialize, then
+                    # close it themselves. Mux core.channels(agent)
+                    # filters to state=='open' so a closed channel
+                    # is invisible to the consumer.
+                    print(
+                        f"  (channel {ch_id} left OPEN for "
+                        f"consumer to close on receipt)"
+                    )
+                else:
+                    client.close(
+                        ch_id, reason="continuityd_send_done"
+                    )
             except Exception as e:
                 print(
                     f"ERROR: mux transport failed: {e}",
@@ -533,7 +710,8 @@ def _cmd_send(args: argparse.Namespace) -> int:
                 return 1
             print(
                 f"✓ delivered via mux to {mux_server} "
-                f"intent={intent} target={target_agent}"
+                f"intent={intent} target={target_agent} "
+                f"channel={ch_id}"
             )
         elif args.transport == "http":
             # v0.5.3: HTTP POST to peer /inbox/<filename>.
@@ -720,6 +898,16 @@ def main(argv: Optional[list[str]] = None) -> int:
              "'tcd-sender')",
     )
     p_send.add_argument(
+        "--mux-keep-open",
+        action="store_true",
+        help=(
+            "v0.6.1+ leave mux channel open after send so a "
+            "polling consumer (= tcd mux-consumer) can see + "
+            "materialize the frame, then close it themselves. "
+            "Required for end-to-end mux delivery."
+        ),
+    )
+    p_send.add_argument(
         "--no-ains",
         action="store_true",
         help="Skip AINS API identity lookup (v0.5.2+)",
@@ -822,6 +1010,49 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Keep inbox dir after exit (default: clean up ephemeral)",
     )
     p_recv.set_defaults(func=_cmd_recv)
+
+    # `tcd mux-consumer` — polling receiver for mux frames
+    p_muxc = sub.add_parser(
+        "mux-consumer",
+        help=(
+            "Poll a tibet-mux server and materialize incoming frames "
+            "as inbox files (v0.6.1+)"
+        ),
+    )
+    p_muxc.add_argument(
+        "--server", default=None,
+        help="tibet-mux base URL (default: TIBET_MUX_SERVER env or "
+             "http://localhost:8000)",
+    )
+    p_muxc.add_argument(
+        "--agent", required=True,
+        help="My agent name (= mux target identity)",
+    )
+    p_muxc.add_argument(
+        "--intent", default=None,
+        help="Intent filter (default: continuityd:inbox)",
+    )
+    p_muxc.add_argument(
+        "--inbox", required=True,
+        help="Inbox directory to write incoming bundles into",
+    )
+    p_muxc.add_argument(
+        "--interval", type=float, default=1.0,
+        help="Poll interval in seconds (default 1.0)",
+    )
+    p_muxc.add_argument(
+        "--duration", type=int, default=0,
+        help="Max seconds to run (0 = forever, default 0)",
+    )
+    p_muxc.add_argument(
+        "--count", type=int, default=0,
+        help="Stop after N materializations (0 = unlimited)",
+    )
+    p_muxc.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="Verbose polling output",
+    )
+    p_muxc.set_defaults(func=_cmd_mux_consumer)
 
     args = parser.parse_args(argv)
 

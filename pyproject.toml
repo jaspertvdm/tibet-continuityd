@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tibet-continuityd"
-version = "0.6.0"
+version = "0.6.1"
 description = "Continuity daemon and sealed handoff tool — watch, sniff, verify, triage, reseal, police, and send continuity-bearing TBZ objects across local and cross-host lanes."
 readme = "README.md"
 license = {text = "MIT"}
@@ -54,7 +54,7 @@ phantom = [
 # tibet-mux transport — single-port channel multiplexer.
 # Enables `tcd send --transport mux` over tibet-mux server.
 mux = [
-    "tibet-mux>=1.0.0",
+    "tibet-mux>=1.0.1",
 ]
 # Full stack: verify + phantom + extra crypto/cbor primitives.
 full = [
