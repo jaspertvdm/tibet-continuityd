@@ -424,6 +424,39 @@ class ContinuityDaemon:
             f"verdict={vf_result.causal_ids.trust_verdict_id}]"
         )
 
+        # ─── Heartbeat lane (v0.6.3) ───────────────────────────
+        # If the verified manifest declares surface_priority=heartbeat
+        # AND the verify-stage validated the identity-pin, route to
+        # log-only-lane: skip Fork/Seal/Police. This handles shutdown
+        # / reboot / "I'm alive" liveness signals without churning the
+        # full sealed-state pipeline. Identity-pin is the safety check;
+        # unsigned or untrusted bundles never reach this branch because
+        # vf_result.valid would be False.
+        manifest_priority = vf_result.manifest.get(
+            "surface_priority", "normal"
+        )
+        if manifest_priority == "heartbeat" and vf_result.valid:
+            self._stats["heartbeats_received"] = (
+                self._stats.get("heartbeats_received", 0) + 1
+            )
+            sender_aint = vf_result.manifest.get(
+                "sender_aint", "?"
+            )
+            self.log.info(
+                f"heartbeat: {event.name!r} from {sender_aint} "
+                f"[verified, log-only-lane]"
+            )
+            self._emit_audit({
+                "ts": time.time(),
+                "lane": str(event.lane),
+                "name": event.name,
+                "stage": "heartbeat",
+                "sender_aint": sender_aint,
+                "verified": True,
+                **vf_result.causal_ids.to_dict(),
+            })
+            return  # skip Seal/Police stages
+
         # ─── Seal stage (v0.3.0, only on trusted-fork) ─────────
         if self._seal_engine is None:
             return

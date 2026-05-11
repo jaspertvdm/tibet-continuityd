@@ -414,6 +414,75 @@ def _cmd_recv(args: argparse.Namespace) -> int:
     return rc
 
 
+def _cmd_heartbeat(args: argparse.Namespace) -> int:
+    """Subcommand: send a heartbeat envelope (= surface_priority=heartbeat).
+
+    v0.6.3 short-circuit lane: receiver's daemon, on verifying the
+    identity pin, will skip Fork/Seal/Police and emit a log-only
+    audit record. Used for liveness signals, shutdown / reboot
+    announcements, or any "I exist" notification that does NOT
+    need to mutate sealed state.
+
+    Payload structure:
+        {kind: heartbeat, sender_aint, ts_iso, beat_seq, kind_detail}
+
+    Where kind_detail can be:
+        liveness   — default; "I'm still here"
+        shutdown   — "I'm going offline" (peer may persist last_seen)
+        reboot     — "I'm restarting" (peer may pause work)
+        custom     — caller-supplied semantic via --kind-detail
+    """
+    kind_detail = args.kind_detail or "liveness"
+    ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload = {
+        "kind": "heartbeat",
+        "version": "v0.6.3",
+        "kind_detail": kind_detail,
+        "ts_iso": ts_iso,
+        "beat_seq": int(time.time()),
+        "note": args.note or "",
+    }
+    with tempfile.NamedTemporaryFile(
+        prefix="tcd-hb-", suffix=".json",
+        mode="w", delete=False,
+    ) as f:
+        json.dump(payload, f)
+        hb_payload_path = f.name
+
+    surface_context = f"heartbeat-{kind_detail}"
+
+    class _Synth:
+        pass
+    inner = _Synth()
+    inner.file = hb_payload_path
+    inner.to = args.to
+    inner.identity = args.identity
+    inner.receiver_aint = args.receiver_aint
+    inner.receiver_pubkey = args.receiver_pubkey
+    inner.surface_time = args.surface_time or time.strftime("%Y-%m-%d")
+    inner.surface_context = surface_context
+    inner.surface_profile = args.surface_profile or "claude"
+    inner.surface_priority = "heartbeat"  # v0.6.3 5e priority
+    inner.transport = args.transport
+    inner.no_ains = args.no_ains
+    inner.no_http_auth = args.no_http_auth
+    inner.min_trust = args.min_trust
+    inner.dry_run = args.dry_run
+    inner.verbose = args.verbose
+    # mux-related (default None — only used when transport=mux)
+    inner.mux_server = getattr(args, "mux_server", None)
+    inner.mux_target = getattr(args, "mux_target", None)
+    inner.mux_intent = getattr(args, "mux_intent", None)
+    inner.mux_agent = getattr(args, "mux_agent", None)
+    inner.mux_keep_open = getattr(args, "mux_keep_open", False)
+
+    print(
+        f"♡ heartbeat ({kind_detail}, seq={payload['beat_seq']}) "
+        f"→ {args.to}"
+    )
+    return _cmd_send(inner)
+
+
 def _cmd_ack(args: argparse.Namespace) -> int:
     """Subcommand: send a signed ACK bundle referencing a prior event.
 
@@ -976,6 +1045,55 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_ack.add_argument("--dry-run", action="store_true")
     p_ack.add_argument("-v", "--verbose", action="store_true")
     p_ack.set_defaults(func=_cmd_ack)
+
+    # `tcd heartbeat --to TARGET [--kind-detail liveness|shutdown|reboot]`
+    p_hb = sub.add_parser(
+        "heartbeat",
+        help=(
+            "Send a heartbeat envelope — short-circuit lane at "
+            "receiver: log-only, skip Fork/Seal/Police (v0.6.3+)"
+        ),
+    )
+    p_hb.add_argument(
+        "--to", required=True,
+        help="Target where the heartbeat should be delivered",
+    )
+    p_hb.add_argument(
+        "--kind-detail",
+        default="liveness",
+        choices=["liveness", "shutdown", "reboot", "custom"],
+        help=(
+            "Heartbeat semantic. liveness=I'm here (default); "
+            "shutdown=going offline; reboot=restarting; "
+            "custom=caller-supplied via --note."
+        ),
+    )
+    p_hb.add_argument(
+        "--note", default=None,
+        help="Optional human-readable note (free-form)",
+    )
+    for opt in [
+        "identity", "receiver-aint", "receiver-pubkey",
+        "surface-time", "surface-profile",
+    ]:
+        p_hb.add_argument(f"--{opt}", default=None)
+    p_hb.add_argument(
+        "--transport",
+        choices=("scp", "http", "mux"),
+        default="scp",
+    )
+    p_hb.add_argument("--no-ains", action="store_true")
+    p_hb.add_argument("--no-http-auth", action="store_true")
+    p_hb.add_argument("--min-trust", type=float, default=0.5)
+    p_hb.add_argument("--dry-run", action="store_true")
+    p_hb.add_argument("-v", "--verbose", action="store_true")
+    # Mirror mux flags so heartbeat works over mux transport
+    p_hb.add_argument("--mux-server", default=None)
+    p_hb.add_argument("--mux-target", default=None)
+    p_hb.add_argument("--mux-intent", default=None)
+    p_hb.add_argument("--mux-agent", default=None)
+    p_hb.add_argument("--mux-keep-open", action="store_true")
+    p_hb.set_defaults(func=_cmd_heartbeat)
 
     # `tcd recv --port 8443 --wait 60` — ephemeral HTTP listener
     p_recv = sub.add_parser(
