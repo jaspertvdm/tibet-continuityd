@@ -424,7 +424,7 @@ class ContinuityDaemon:
             f"verdict={vf_result.causal_ids.trust_verdict_id}]"
         )
 
-        # ─── Heartbeat lane (v0.6.3) ───────────────────────────
+        # ─── Heartbeat lane (v0.6.3+, liveness tracking v0.6.6+) ─
         # If the verified manifest declares surface_priority=heartbeat
         # AND the verify-stage validated the identity-pin, route to
         # log-only-lane: skip Fork/Seal/Police. This handles shutdown
@@ -436,15 +436,42 @@ class ContinuityDaemon:
             "surface_priority", "normal"
         )
         if manifest_priority == "heartbeat" and vf_result.valid:
-            self._stats["heartbeats_received"] = (
-                self._stats.get("heartbeats_received", 0) + 1
-            )
             sender_aint = vf_result.manifest.get(
                 "sender_aint", "?"
             )
+            # v0.6.6: extract kind_detail from surface_context
+            from tibet_continuityd.liveness import (
+                kind_detail_from_surface_context,
+            )
+            surface_ctx = vf_result.manifest.get(
+                "surface_context", ""
+            )
+            kind_detail = kind_detail_from_surface_context(
+                surface_ctx
+            )
+            # v0.6.6: update LivenessTracker (idempotent on
+            # surface_hash to absorb mux-replay duplicates)
+            updated = None
+            if self._liveness_tracker is not None:
+                surface_hash = vf_result.causal_ids.surface_hash
+                updated = self._liveness_tracker.record_heartbeat(
+                    sender_did=sender_aint,
+                    kind_detail=kind_detail,
+                    surface_hash=surface_hash,
+                )
+            if updated is None and self._liveness_tracker is not None:
+                # Deduplicated — skip audit + counter
+                self.log.info(
+                    f"heartbeat: {event.name!r} from "
+                    f"{sender_aint} [dedup — already counted]"
+                )
+                return
+            self._stats["heartbeats_received"] = (
+                self._stats.get("heartbeats_received", 0) + 1
+            )
             self.log.info(
                 f"heartbeat: {event.name!r} from {sender_aint} "
-                f"[verified, log-only-lane]"
+                f"kind={kind_detail} [verified, log-only-lane]"
             )
             self._emit_audit({
                 "ts": time.time(),
@@ -452,6 +479,7 @@ class ContinuityDaemon:
                 "name": event.name,
                 "stage": "heartbeat",
                 "sender_aint": sender_aint,
+                "kind_detail": kind_detail,
                 "verified": True,
                 **vf_result.causal_ids.to_dict(),
             })
@@ -538,10 +566,34 @@ class ContinuityDaemon:
             f"inbox={self.cfg.inbox})"
         )
 
+        # v0.6.6: LivenessTracker — peer-presence over heartbeat-lane.
+        # Must initialize BEFORE HTTP server so the HTTP server can
+        # serve /liveness endpoints backed by the same tracker.
+        # Persists to TIBET_CONTINUITYD_LIVENESS_FILE if set
+        # (default: <inbox-dir>/../liveness.json for sibling-of-inbox).
+        from tibet_continuityd.liveness import LivenessTracker
+        persist_file = None
+        env_liveness = os.environ.get(
+            "TIBET_CONTINUITYD_LIVENESS_FILE", ""
+        )
+        if env_liveness:
+            persist_file = Path(env_liveness)
+        else:
+            try:
+                persist_file = self.cfg.inbox.parent / "liveness.json"
+            except Exception:
+                persist_file = None
+        self._liveness_tracker = LivenessTracker(
+            persist_file=persist_file
+        )
+        self.log.info(
+            f"liveness tracker: persist={persist_file}"
+        )
+
         # v0.5.3 Optional HTTP inbox listener — special-purpose port
         # for cross-host transport over firewall-friendly HTTP.
         # Default OFF (= env-var TIBET_CONTINUITYD_HTTP_PORT to enable).
-        # Future v0.5.4+ will bridge to tibet-mux for universal :443.
+        # v0.6.6: serves /liveness query endpoints when tracker set.
         self._http_server = None
         http_port_str = os.environ.get("TIBET_CONTINUITYD_HTTP_PORT", "")
         if http_port_str:
@@ -559,6 +611,7 @@ class ContinuityDaemon:
                     port=http_port,
                     host=http_host,
                     version=_ver,
+                    liveness_tracker=self._liveness_tracker,
                 )
                 self._http_server.start()
 

@@ -114,6 +114,8 @@ The `tcd` CLI now supports:
   - ephemeral HTTP listener for one-shot receive (v0.5.9+)
 - `tcd mux-consumer --server URL --agent AGENT --inbox PATH`
   - polling consumer that materializes mux frames into a local inbox (v0.6.1+)
+- `tcd liveness [DID] --server URL`
+  - query peer-presence state via daemon's `/liveness` endpoint (v0.6.6+)
 
 This means `tibet-continuityd` is no longer only a passive inbox daemon.
 
@@ -219,6 +221,26 @@ primitive** in the stack.
   normal Sniff / Verify / Seal pipeline
 - channel left OPEN by sender with `--mux-keep-open` so the polling
   consumer can find + close it after materialize
+
+### Liveness tracker (v0.6.6+)
+
+- in-memory peer-presence table updated from the heartbeat-lane
+- transitions on `kind_detail`:
+  - `liveness` → peer alive, TTL clock resets
+  - `shutdown` → peer marked stopped, alive flips to false
+  - `reboot` → peer rebooting, ~30s expected_back countdown
+- HTTP query endpoints when the inbox-http listener is enabled:
+  - `GET /liveness` returns all peers
+  - `GET /liveness/<did>` returns one peer with derived
+    `alive`, `age_seconds`, and `expected_back_sec`
+- CLI: `tcd liveness [DID] --server http://daemon:port`
+- persists to `liveness.json` (configurable via
+  `TIBET_CONTINUITYD_LIVENESS_FILE`); recovers state on daemon restart
+- idempotent: a duplicate `surface_hash` within 30 seconds is skipped
+  to absorb mux-replay patterns without double-counting beats
+
+This gives the causal substrate a presence dimension: not just *what
+happened in what order*, but *who is reachable right now*.
 
 ### Recv (v0.5.9+)
 

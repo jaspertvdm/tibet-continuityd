@@ -414,6 +414,82 @@ def _cmd_recv(args: argparse.Namespace) -> int:
     return rc
 
 
+def _cmd_liveness(args: argparse.Namespace) -> int:
+    """Subcommand: query a peer's liveness state via HTTP.
+
+    v0.6.6: queries `GET /liveness/<did>` on a peer daemon that has
+    the HTTP listener enabled (= TIBET_CONTINUITYD_HTTP_PORT set).
+
+    Without --did, lists all peers seen by the target daemon.
+    """
+    import urllib.error as _err
+
+    base = args.server.rstrip("/")
+    if args.did:
+        import urllib.parse as _up
+        url = f"{base}/liveness/{_up.quote(args.did, safe='')}"
+    else:
+        url = f"{base}/liveness"
+
+    try:
+        with urllib.request.urlopen(url, timeout=5.0) as resp:
+            body = resp.read().decode("utf-8")
+            status = resp.status
+    except _err.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        status = e.code
+    except _err.URLError as e:
+        print(f"ERROR: cannot reach {url}: {e}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(body)
+        return 0 if status == 200 else 1
+
+    # Human-readable rendering
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        print(body)
+        return 1
+
+    if args.did:
+        alive = data.get("alive")
+        last_seen = data.get("last_seen_iso", "?")
+        age = data.get("age_seconds")
+        kind = data.get("last_kind_detail", "?")
+        beat_count = data.get("beat_count", 0)
+        glyph = "✓ alive" if alive else "✗ offline"
+        line = (
+            f"{glyph}  did={args.did}\n"
+            f"   last_seen     = {last_seen} "
+            f"({age}s ago)\n"
+            f"   last_kind     = {kind}\n"
+            f"   beat_count    = {beat_count}"
+        )
+        if data.get("last_note"):
+            line += f"\n   last_note     = {data['last_note']}"
+        if data.get("expected_back_sec") is not None:
+            line += (
+                f"\n   expected_back = "
+                f"~{int(data['expected_back_sec'])}s"
+            )
+        print(line)
+        return 0 if alive else 1
+    else:
+        peers = data.get("peers", []) or []
+        print(f"liveness peers ({len(peers)}):")
+        for p in peers:
+            glyph = "✓" if p.get("alive") else "✗"
+            print(
+                f"  {glyph} {p.get('sender_did'):<45} "
+                f"kind={p.get('last_kind_detail'):<10} "
+                f"age={p.get('age_seconds'):>6}s "
+                f"beats={p.get('beat_count')}"
+            )
+        return 0
+
+
 def _cmd_heartbeat(args: argparse.Namespace) -> int:
     """Subcommand: send a heartbeat envelope (= surface_priority=heartbeat).
 
@@ -1094,6 +1170,31 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_hb.add_argument("--mux-agent", default=None)
     p_hb.add_argument("--mux-keep-open", action="store_true")
     p_hb.set_defaults(func=_cmd_heartbeat)
+
+    # `tcd liveness [--did DID] --server URL` — query peer presence
+    p_lv = sub.add_parser(
+        "liveness",
+        help=(
+            "Query peer liveness state via HTTP /liveness endpoint "
+            "(v0.6.6+)"
+        ),
+    )
+    p_lv.add_argument(
+        "did", nargs="?", default=None,
+        help=(
+            "Sender DID to query (= jis:org:service@host). "
+            "If omitted, lists all peers."
+        ),
+    )
+    p_lv.add_argument(
+        "--server", required=True,
+        help="Daemon HTTP base URL (e.g. http://JTel-brain:8443)",
+    )
+    p_lv.add_argument(
+        "--json", action="store_true",
+        help="Print raw JSON response instead of human format",
+    )
+    p_lv.set_defaults(func=_cmd_liveness)
 
     # `tcd recv --port 8443 --wait 60` — ephemeral HTTP listener
     p_recv = sub.add_parser(

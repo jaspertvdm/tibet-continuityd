@@ -172,7 +172,11 @@ def _verify_auth_header(
     return pubkey_hex, in_allow
 
 
-def _make_handler(inbox_dir: Path, version: str = "?"):
+def _make_handler(
+    inbox_dir: Path,
+    version: str = "?",
+    liveness_tracker=None,
+):
     """Factory: returns a request-handler class bound to inbox_dir."""
 
     class _InboxHTTPHandler(BaseHTTPRequestHandler):
@@ -186,10 +190,65 @@ def _make_handler(inbox_dir: Path, version: str = "?"):
                     f"tibet-continuityd v{version} HTTP inbox\n"
                     f"inbox={inbox_dir}\n"
                     f"POST /inbox/<filename> to deliver.\n"
+                    f"GET  /liveness          for all peers\n"
+                    f"GET  /liveness/<did>    for one peer\n"
                 )
                 payload = body.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            # v0.6.6: liveness query endpoints
+            import json as _json
+            if self.path == "/liveness":
+                if liveness_tracker is None:
+                    self.send_response(503)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                peers = liveness_tracker.all()
+                payload = _json.dumps({
+                    "version": "v0.6.6",
+                    "peer_count": len(peers),
+                    "peers": peers,
+                }, indent=2).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            if self.path.startswith("/liveness/"):
+                if liveness_tracker is None:
+                    self.send_response(503)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                did = self.path[len("/liveness/"):]
+                import urllib.parse as _up
+                did = _up.unquote(did)
+                rec = liveness_tracker.get(did)
+                if not rec:
+                    self.send_response(404)
+                    payload = _json.dumps({
+                        "sender_did": did,
+                        "alive": False,
+                        "reason": "no heartbeat record",
+                    }).encode("utf-8")
+                    self.send_header(
+                        "Content-Type", "application/json"
+                    )
+                    self.send_header(
+                        "Content-Length", str(len(payload))
+                    )
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
+                payload = _json.dumps(rec, indent=2).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
                 self.wfile.write(payload)
@@ -327,16 +386,22 @@ class InboxHTTPServer:
         port: int,
         host: str = "0.0.0.0",
         version: str = "?",
+        liveness_tracker=None,
     ):
         self.inbox_dir = inbox_dir
         self.port = port
         self.host = host
         self.version = version
+        self.liveness_tracker = liveness_tracker
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
-        handler_cls = _make_handler(self.inbox_dir, version=self.version)
+        handler_cls = _make_handler(
+            self.inbox_dir,
+            version=self.version,
+            liveness_tracker=self.liveness_tracker,
+        )
         self._httpd = ThreadingHTTPServer(
             (self.host, self.port), handler_cls
         )
