@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tibet-continuityd"
-version = "0.4.1"
+version = "0.5.0"
 description = "Continuous integrity system daemon for the Distributed Continuity OS — Watch, Sniff, Coalesce, Verify, Fork, Trust, Seal, Police, Backpressure across 3 modes (passive/active/strict)."
 readme = "README.md"
 license = {text = "MIT"}
@@ -60,8 +60,8 @@ full = [
 ]
 
 [project.scripts]
-tibet-continuityd = "tibet_continuityd.daemon:main"
-tcd = "tibet_continuityd.daemon:main"
+tibet-continuityd = "tibet_continuityd.cli:main"
+tcd = "tibet_continuityd.cli:main"
 
 [project.urls]
 Homepage = "https://humotica.com"
