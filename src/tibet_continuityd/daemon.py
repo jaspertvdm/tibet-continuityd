@@ -396,10 +396,25 @@ class ContinuityDaemon:
             self._stats["by_disposition"].get(
                 vf_result.disposition, 0) + 1
 
+        # v0.6.7: rename-detect — compare on-disk filename against
+        # canonical SSM name reconstructed from the manifest. If they
+        # differ, an operator (or human) renamed the bundle for
+        # navigation purposes; the audit record captures both so the
+        # rename is explicit instead of silent.
+        try:
+            from tibet_drop.bundle import canonical_filename
+            canonical = canonical_filename(vf_result.manifest)
+            renamed = canonical != event.name
+        except (ImportError, Exception):
+            canonical = None
+            renamed = False
+
         verify_record = {
             "ts": time.time(),
             "lane": str(event.lane),
             "name": event.name,
+            "canonical_name": canonical,
+            "renamed_by_operator": renamed,
             "stage": "verify-fork",
             "mode": self.cfg.mode,
             "verify_valid": vf_result.valid,
@@ -413,6 +428,11 @@ class ContinuityDaemon:
             "path_churn_detected": event.path_churn_detected,
             **vf_result.causal_ids.to_dict(),
         }
+        if renamed:
+            self.log.info(
+                f"rename detected: human_name={event.name!r} "
+                f"canonical={canonical!r}"
+            )
         self._emit_audit(verify_record)
         self.log.info(
             f"verify-fork: {event.name!r} → "
@@ -643,12 +663,22 @@ class ContinuityDaemon:
                     ))
                 except ValueError:
                     mux_interval = 1.0
+                # v0.6.8: persist _seen set next to liveness.json
+                # so daemon-restarts don't re-consume stale mux frames
+                seen_file = None
+                try:
+                    seen_file = (
+                        self.cfg.inbox.parent / "mux-consumer-seen.json"
+                    )
+                except Exception:
+                    seen_file = None
                 self._mux_consumer = MuxConsumerThread(
                     server=mux_server,
                     agent=mux_agent,
                     inbox_dir=self.cfg.inbox,
                     intent=mux_intent,
                     interval=mux_interval,
+                    seen_file=seen_file,
                 )
                 self._mux_consumer.start()
             except ImportError as e:

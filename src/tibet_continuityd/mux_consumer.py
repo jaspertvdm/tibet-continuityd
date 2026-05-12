@@ -49,6 +49,7 @@ class MuxConsumerThread:
         inbox_dir: Path,
         intent: str = "continuityd:inbox",
         interval: float = 1.0,
+        seen_file: Optional[Path] = None,
     ):
         self.server = server.rstrip("/")
         self.agent = agent
@@ -57,13 +58,65 @@ class MuxConsumerThread:
         self.interval = max(0.1, float(interval))
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # v0.6.8: persist _seen across daemon restarts so we don't
+        # re-materialize stale frames the mux server still holds in
+        # recent_frames. Without this, every daemon-restart caused a
+        # full re-consume of historical channels (= the v0.6.x mux
+        # replay-on-startup problem).
+        self._seen_file = seen_file
         self._seen: set = set()  # (channel_id, seq) pairs
+        if seen_file and seen_file.exists():
+            self._load_seen()
         self._stats = {
             "polls": 0,
             "poll_errors": 0,
             "materialized": 0,
             "channels_seen": 0,
+            "dedup_persisted": len(self._seen),
         }
+
+    def _load_seen(self) -> None:
+        """Read persisted (channel_id, seq) tuples from disk."""
+        try:
+            data = json.loads(
+                self._seen_file.read_text(encoding="utf-8")
+            )
+            seen_list = data.get("seen", []) if isinstance(data, dict) else []
+            for entry in seen_list:
+                if isinstance(entry, list) and len(entry) == 2:
+                    self._seen.add((entry[0], entry[1]))
+            _log.info(
+                f"mux-consumer: loaded {len(self._seen)} persisted "
+                f"seen entries from {self._seen_file}"
+            )
+        except (OSError, json.JSONDecodeError) as e:
+            _log.warning(
+                f"mux-consumer: could not load seen file: {e}"
+            )
+
+    def _persist_seen(self) -> None:
+        """Write current _seen set to disk (best-effort)."""
+        if not self._seen_file:
+            return
+        try:
+            self._seen_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._seen_file.with_suffix(
+                self._seen_file.suffix + ".part"
+            )
+            payload = {
+                "version": "v0.6.8",
+                "agent": self.agent,
+                "intent": self.intent,
+                "count": len(self._seen),
+                "seen": [list(t) for t in self._seen],
+            }
+            tmp.write_text(
+                json.dumps(payload, sort_keys=True),
+                encoding="utf-8",
+            )
+            tmp.replace(self._seen_file)
+        except OSError as e:
+            _log.debug(f"mux-consumer: persist failed: {e}")
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -189,6 +242,10 @@ class MuxConsumerThread:
                     if self._materialize_frame(ch_id, frame):
                         materialized_any = True
                         self._stats["materialized"] += 1
+                        # v0.6.8: persist after every successful
+                        # materialization so a crash-before-poll
+                        # doesn't lose dedup state.
+                        self._persist_seen()
                 if materialized_any:
                     self._close_channel(
                         ch_id, "daemon_consumer_received"

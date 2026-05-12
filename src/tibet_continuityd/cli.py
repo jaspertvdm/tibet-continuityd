@@ -28,6 +28,83 @@ from typing import Optional, Tuple
 _DEFAULT_AINS_API = "https://brein.jaspervandemeent.nl/api/ains/resolve"
 
 
+def _pack_in_process(
+    src: Path,
+    bundle_out: Path,
+    identity_dir: Path,
+    receiver_aint: str,
+    receiver_pubkey: str,
+    surface_time: str,
+    surface_context: str,
+    surface_profile: str,
+    surface_priority: str,
+    sender_aint: str = "tcd.sender",
+) -> Optional[str]:
+    """v0.6.9 in-process pack — skip subprocess(python -m tibet_drop pack).
+
+    Calls tibet_drop.bundle.pack_bundle() directly. Eliminates the
+    ~400-600ms Python-spawn-and-import overhead per `tcd send` /
+    `tcd heartbeat`. Falls back to None (caller goes to subprocess
+    path) if any import or pack step fails.
+
+    Returns None on success, or an error string on failure (caller
+    can then retry via subprocess for robust fallback behaviour).
+    """
+    try:
+        from tibet_drop.bundle import pack_bundle
+        from tibet_drop.crypto import IdentityKey
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        from cryptography.hazmat.primitives import serialization
+    except ImportError as e:
+        return f"in-process pack unavailable: {e}"
+
+    try:
+        # Identity load or generate (= idempotent like `tibet_drop init`)
+        priv_path = identity_dir / "identity.priv"
+        if not priv_path.exists():
+            identity_dir.mkdir(parents=True, exist_ok=True)
+            priv = ed25519.Ed25519PrivateKey.generate()
+            priv_bytes = priv.private_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PrivateFormat.Raw,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+            priv_path.write_bytes(priv_bytes)
+            priv_path.chmod(0o600)
+        else:
+            priv_bytes = priv_path.read_bytes()
+            priv = ed25519.Ed25519PrivateKey.from_private_bytes(priv_bytes)
+        signer = IdentityKey(priv=priv, pub=priv.public_key())
+
+        # Read source file content
+        if src.is_dir():
+            return "in-process pack: directory inputs not yet supported"
+        block_name = src.name
+        content = src.read_bytes()
+
+        # Generate a tpid (= 16 random bytes per spec)
+        import os as _os
+        tpid = _os.urandom(16)
+
+        pack_bundle(
+            output_path=bundle_out,
+            blocks=[(block_name, content)],
+            sender_aint=sender_aint,
+            sender_signer=signer,
+            receiver_aint=receiver_aint,
+            receiver_pubkey_hex=receiver_pubkey,
+            payload_type="ai_state",
+            tpid=tpid,
+            surface_time_fragment=surface_time,
+            surface_context=surface_context,
+            surface_profile=surface_profile,
+            surface_priority=surface_priority,
+        )
+        return None  # success
+    except Exception as e:
+        return f"in-process pack failed: {type(e).__name__}: {e}"
+
+
 def _compute_http_auth_header(
     identity_dir: Path, body_bytes: bytes
 ) -> Optional[str]:
@@ -732,50 +809,57 @@ def _cmd_send(args: argparse.Namespace) -> int:
     with tempfile.TemporaryDirectory(prefix="tcd-send-pack-") as tmp:
         bundle_out = Path(tmp) / bundle_name
 
-        # Init identity if needed (idempotent)
-        init_cmd = [
-            sys.executable, "-m", "tibet_drop", "init",
-            "--out", str(identity_dir),
-            "--aint", "tcd.sender",
-        ]
-        rc = subprocess.run(init_cmd, capture_output=True)
-        # init may fail if already exists; that's OK
-
-        # Pack the source into a sealed .tza bundle.
-        # Surface-args are sandbox-version-only; PyPI 0.1.0 doesn't
-        # know them. Try with surface-args first; on
-        # "unrecognized arguments" retry without. SSM-name on the
-        # output path is preserved either way.
-        pack_cmd_base = [
-            sys.executable, "-m", "tibet_drop", "pack",
-            "--identity", str(identity_dir),
-            "--receiver-aint", receiver_aint,
-            "--receiver-pubkey", receiver_pubkey,
-            "--input", str(src),
-            "--output", str(bundle_out),
-        ]
-        pack_cmd_with_surface = pack_cmd_base + [
-            "--surface-time", surface_time,
-            "--surface-context", surface_context,
-            "--surface-profile", surface_profile,
-            "--surface-priority", surface_priority,
-        ]
-        result = subprocess.run(
-            pack_cmd_with_surface, capture_output=True, text=True
+        # v0.6.9: try in-process pack first (~50ms vs ~600ms for
+        # subprocess). Falls back to subprocess path on any failure
+        # so older deployments without tibet-drop>=0.3.0 still work.
+        in_process_err = _pack_in_process(
+            src=src,
+            bundle_out=bundle_out,
+            identity_dir=Path(identity_dir),
+            receiver_aint=receiver_aint,
+            receiver_pubkey=receiver_pubkey,
+            surface_time=surface_time,
+            surface_context=surface_context,
+            surface_profile=surface_profile,
+            surface_priority=surface_priority,
         )
-        if result.returncode != 0 and "unrecognized arguments" in result.stderr:
-            # Older tibet-drop on PyPI lacks surface-* flags.
-            # Retry without; the SSM filename on --output is enough
-            # for the receiver's sniff/SSM-routing stage.
+        if in_process_err is not None:
+            # Fallback path: subprocess (= legacy compatibility)
+            if args.verbose:
+                print(f"  (in-process pack fallback: {in_process_err})")
+            init_cmd = [
+                sys.executable, "-m", "tibet_drop", "init",
+                "--out", str(identity_dir),
+                "--aint", "tcd.sender",
+            ]
+            subprocess.run(init_cmd, capture_output=True)
+            pack_cmd_base = [
+                sys.executable, "-m", "tibet_drop", "pack",
+                "--identity", str(identity_dir),
+                "--receiver-aint", receiver_aint,
+                "--receiver-pubkey", receiver_pubkey,
+                "--input", str(src),
+                "--output", str(bundle_out),
+            ]
+            pack_cmd_with_surface = pack_cmd_base + [
+                "--surface-time", surface_time,
+                "--surface-context", surface_context,
+                "--surface-profile", surface_profile,
+                "--surface-priority", surface_priority,
+            ]
             result = subprocess.run(
-                pack_cmd_base, capture_output=True, text=True
+                pack_cmd_with_surface, capture_output=True, text=True
             )
-        if result.returncode != 0:
-            print(
-                f"ERROR: tibet_drop pack failed:\n{result.stderr}",
-                file=sys.stderr,
-            )
-            return result.returncode
+            if result.returncode != 0 and "unrecognized arguments" in result.stderr:
+                result = subprocess.run(
+                    pack_cmd_base, capture_output=True, text=True
+                )
+            if result.returncode != 0:
+                print(
+                    f"ERROR: tibet_drop pack failed:\n{result.stderr}",
+                    file=sys.stderr,
+                )
+                return result.returncode
 
         print(f"✓ packed sealed envelope: {bundle_name}")
 
@@ -941,12 +1025,20 @@ def _cmd_send(args: argparse.Namespace) -> int:
 
 def main(argv: Optional[list[str]] = None) -> int:
     """Top-level CLI dispatcher."""
+    from tibet_continuityd import __version__ as _pkg_version
     parser = argparse.ArgumentParser(
         prog="tcd",
         description=(
             "tibet-continuityd — Distributed Continuity OS daemon. "
             "Without subcommand, runs in daemon mode."
         ),
+    )
+    # v0.6.7: tcd --version (= addresses Richard's joint-draft #3,
+    # CI-bindable version inspection without grepping daemon logs)
+    parser.add_argument(
+        "-V", "--version",
+        action="version",
+        version=f"tcd {_pkg_version}",
     )
     sub = parser.add_subparsers(dest="cmd")
 
@@ -956,6 +1048,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Run the continuity guardian daemon (default)",
     )
     p_run.set_defaults(func=_cmd_run)
+
+    # `tcd version` — subcommand variant (= scriptable alongside --version)
+    p_ver = sub.add_parser(
+        "version",
+        help="Print package version (= tcd --version equivalent)",
+    )
+    p_ver.set_defaults(
+        func=lambda args: (
+            print(f"tcd {_pkg_version}") or 0
+        )
+    )
 
     # `tcd send FILE --to HOST:PATH`
     p_send = sub.add_parser(
