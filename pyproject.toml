@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tibet-continuityd"
-version = "0.6.10"
+version = "0.6.11"
 description = "Continuity daemon and sealed handoff tool — watch, sniff, verify, triage, reseal, police, and send continuity-bearing TBZ objects across local and cross-host lanes."
 readme = "README.md"
 license = {text = "MIT"}

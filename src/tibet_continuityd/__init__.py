@@ -26,7 +26,7 @@ Plus: /srv/jtel-stack/hersenspinsels/tibet-continuity-guardian.md
                                 — Codex, 9 mei 2026
 """
 
-__version__ = "0.6.10"
+__version__ = "0.6.11"
 __author__ = "Jasper van de Meent, Root AI, Codex"
 
 # Core stages — pure stdlib, always available
@@ -103,3 +103,16 @@ __all__ = [
     # Capability flag
     "_HAS_VERIFY",
 ]
+
+
+# v0.6.11 — credential-request-without-context sniff (JWT-sniff primitive)
+try:
+    from tibet_continuityd.credential_sniff import (
+        CredentialRequestObserver,
+        CredentialRequestEvent,
+        CredentialRequestVerdict,
+        ChallengeRecord,
+        DEFAULT_CREDENTIAL_PATHS,
+    )
+except ImportError:
+    CredentialRequestObserver = None  # type: ignore
