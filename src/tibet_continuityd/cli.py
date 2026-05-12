@@ -203,6 +203,34 @@ def _resolve_jis_did(did: str) -> Tuple[str, str, str]:
         "/var/lib/tibet/inbox",
     )
     ssh_target = f"{ssh_user}@{host}:{inbox}"
+
+    # v0.6.10 hostname-resolution diagnostic.
+    # Pre-check via getaddrinfo so we fail FAST with a clear hint
+    # rather than burying the cause inside a downstream mux/scp
+    # "Name or service not known" trace.
+    try:
+        import socket as _sock
+        _sock.getaddrinfo(host, None)
+    except _sock.gaierror as e:
+        import sys as _sys
+        print(
+            f"⚠ hostname '{host}' could not be resolved "
+            f"(DNS/mDNS/AINS).\n"
+            f"  cause: {e}\n"
+            f"  hints:\n"
+            f"    1. Use the full hostname or LAN IP:\n"
+            f"       --to jis:<org>:<service>@<lan-ip>\n"
+            f"    2. Add to /etc/hosts on this machine:\n"
+            f"       <lan-ip>  {host}\n"
+            f"    3. Check AINS for resolution:\n"
+            f"       curl -s https://brein.jaspervandemeent.nl/api/ains/resolve/{host}\n"
+            f"  Continuing in case downstream transport accepts it...",
+            file=_sys.stderr,
+        )
+        # NB: not fatal — some transports (mux) may accept the hostname
+        # because the URL is supplied separately via --mux-server.
+        # We just want the operator to know early.
+
     return ssh_target, host, inbox
 
 
