@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import socket
 import sys
 from pathlib import Path
 
@@ -10,6 +11,31 @@ if str(_PKG) not in sys.path:
     sys.path.insert(0, str(_PKG))
 
 from tibet_continuityd import cli  # noqa: E402
+
+
+def test_is_same_host_true_for_local_lan_ip_even_if_hostname_is_loopback(
+    monkeypatch,
+):
+    """Literal local LAN IP must count as same-host."""
+    monkeypatch.setenv("HOSTNAME", "JTel-brain")
+
+    def fake_host_ip_set(host: str):
+        mapping = {
+            "JTel-brain": {"127.0.1.1"},
+            "jtel-brain": {"127.0.1.1"},
+            "192.168.4.76": {"192.168.4.76"},
+        }
+        return mapping.get(host, set())
+
+    monkeypatch.setattr(cli, "_host_ip_set", fake_host_ip_set)
+    monkeypatch.setattr(
+        cli, "_discover_local_ip_set",
+        lambda: {"127.0.0.1", "127.0.1.1", "192.168.4.76"},
+    )
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "JTel-brain")
+    monkeypatch.setattr(socket, "getfqdn", lambda: "JTel-brain")
+    assert cli._is_same_host("192.168.4.76") is True
 
 
 def test_cmd_send_same_host_jis_target_delivers_locally(

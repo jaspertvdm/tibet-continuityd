@@ -60,6 +60,28 @@ def _host_ip_set(host: str) -> set[str]:
     return addrs
 
 
+def _discover_local_ip_set() -> set[str]:
+    """Best-effort local interface IPs, including primary egress IPs."""
+    import socket
+
+    addrs = {"127.0.0.1", "127.0.1.1", "::1"}
+    probes = (
+        (socket.AF_INET, ("192.0.2.1", 9)),
+        (socket.AF_INET, ("8.8.8.8", 53)),
+        (socket.AF_INET6, ("2001:4860:4860::8888", 53)),
+    )
+    for family, peer in probes:
+        try:
+            with socket.socket(family, socket.SOCK_DGRAM) as sock:
+                sock.connect(peer)
+                local_ip = sock.getsockname()[0]
+                if local_ip:
+                    addrs.add(local_ip)
+        except OSError:
+            continue
+    return addrs
+
+
 def _is_same_host(host: str) -> bool:
     """Return True when target host resolves back to this machine."""
     import socket
@@ -86,7 +108,7 @@ def _is_same_host(host: str) -> bool:
     local_ips: set[str] = set()
     for name in local_names:
         local_ips.update(_host_ip_set(name))
-    local_ips.update({"127.0.0.1", "127.0.1.1", "::1"})
+    local_ips.update(_discover_local_ip_set())
     return bool(target_ips & local_ips)
 
 
