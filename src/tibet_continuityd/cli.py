@@ -28,6 +28,78 @@ from typing import Optional, Tuple
 _DEFAULT_AINS_API = "https://brein.jaspervandemeent.nl/api/ains/resolve"
 
 
+def _parse_scp_target(target: str) -> Tuple[Optional[str], Optional[str]]:
+    """Parse <user@host>:<path> or <host>:<path> into (host, path)."""
+    if ":" not in target:
+        return None, None
+    host_part, remote_path = target.split(":", 1)
+    if not host_part or not remote_path:
+        return None, None
+    if "@" in host_part:
+        _user, host = host_part.rsplit("@", 1)
+    else:
+        host = host_part
+    return host, remote_path
+
+
+def _host_ip_set(host: str) -> set[str]:
+    """Best-effort IP set for a host, including loopback aliases."""
+    import socket
+
+    addrs: set[str] = set()
+    try:
+        for family, _stype, _proto, _canon, sockaddr in socket.getaddrinfo(
+            host, None
+        ):
+            if family == socket.AF_INET:
+                addrs.add(sockaddr[0])
+            elif family == socket.AF_INET6:
+                addrs.add(sockaddr[0])
+    except OSError:
+        return addrs
+    return addrs
+
+
+def _is_same_host(host: str) -> bool:
+    """Return True when target host resolves back to this machine."""
+    import socket
+
+    normalized = (host or "").strip().lower()
+    if not normalized:
+        return False
+    if normalized in {"localhost", "127.0.0.1", "127.0.1.1", "::1"}:
+        return True
+
+    local_names = {
+        (socket.gethostname() or "").strip().lower(),
+        (socket.getfqdn() or "").strip().lower(),
+        (os.environ.get("HOSTNAME") or "").strip().lower(),
+    }
+    local_names.discard("")
+    if normalized in local_names:
+        return True
+
+    target_ips = _host_ip_set(host)
+    if not target_ips:
+        return False
+
+    local_ips: set[str] = set()
+    for name in local_names:
+        local_ips.update(_host_ip_set(name))
+    local_ips.update({"127.0.0.1", "127.0.1.1", "::1"})
+    return bool(target_ips & local_ips)
+
+
+def _deliver_local_bundle(bundle_out: Path, inbox_path: str, bundle_name: str) -> None:
+    """Materialize a bundle directly into the local inbox atomically."""
+    inbox = Path(inbox_path).resolve()
+    inbox.mkdir(parents=True, exist_ok=True)
+    part = inbox / (bundle_name + ".part")
+    final = inbox / bundle_name
+    shutil.copy2(bundle_out, part)
+    part.rename(final)
+
+
 def _pack_in_process(
     src: Path,
     bundle_out: Path,
@@ -1029,6 +1101,31 @@ def _cmd_send(args: argparse.Namespace) -> int:
             print(f"✓ delivered via HTTP to {url}")
         else:
             # Default: SCP transport (= v0.5.0/0.5.1/0.5.2 path)
+            target_host, target_inbox = _parse_scp_target(target)
+            if (target_host and target_inbox
+                    and _is_same_host(target_host)):
+                try:
+                    _deliver_local_bundle(
+                        bundle_out=bundle_out,
+                        inbox_path=target_inbox,
+                        bundle_name=bundle_name,
+                    )
+                except OSError as e:
+                    print(
+                        f"ERROR: local same-host delivery failed: {e}",
+                        file=sys.stderr,
+                    )
+                    return 1
+                print(
+                    f"✓ delivered locally to {target_inbox}/{bundle_name} "
+                    f"(same-host)"
+                )
+                print(
+                    f"  peer continuityd will sniff + verify + seal "
+                    f"on arrival"
+                )
+                return 0
+
             scp_cmd = ["scp", str(bundle_out), f"{target}/"]
             if args.verbose:
                 scp_cmd.insert(1, "-v")
