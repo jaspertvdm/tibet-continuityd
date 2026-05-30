@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tibet-continuityd"
-version = "0.6.13"
-description = "Continuity daemon and sealed handoff tool — watch, sniff, verify, triage, reseal, police, and send continuity-bearing TBZ objects across local and cross-host lanes."
+version = "0.6.15"
+description = "Continuity daemon and sealed handoff tool — watch, sniff, verify, triage, reseal, police, and send continuity-bearing TBZ objects across local and cross-host lanes. v0.6.15: hardened verify_fork default path — tibet-drop + cbor2 now required deps (Codex P520 finding)."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
@@ -35,16 +35,21 @@ classifiers = [
     "Topic :: System :: Logging",
 ]
 
-# v0.3 has zero hard runtime dependencies; uses ctypes for inotify
-# and an in-package magic-byte table. Optional dependencies enable
-# cryptographic verify, pack, and reseal stages.
-dependencies = []
+# v0.6.15 makes tibet-drop a required runtime dep — verify_fork imports
+# tibet_drop.bundle on the default arrival path, so its absence used to crash
+# the daemon at runtime (Codex finding on P520, 2026-05-29). cbor2 is pinned
+# explicitly because tibet-drop relies on it for the bundle codec.
+# Other stages (inotify, magic-byte detection) remain ctypes/in-package.
+dependencies = [
+    "tibet-drop>=0.3.1",
+    "cbor2>=5.0",
+]
 
 [project.optional-dependencies]
-# Verify + Fork + Seal stages with cryptographic discipline.
-# tibet-drop covers TBZ pack/verify primitives.
+# The `verify` extra is kept for backwards-compatibility — same crypto deps
+# are now in the base install, so this extra is a no-op alias.
 verify = [
-    "tibet-drop>=0.3.0",
+    "tibet-drop>=0.3.1",
 ]
 # ICC bridge integration via tibet-phantom (Identity-Bound
 # Continuity Container). Installs phantom + drop together.
