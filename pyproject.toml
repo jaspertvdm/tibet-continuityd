@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tibet-continuityd"
-version = "0.6.15"
-description = "Continuity daemon and sealed handoff tool — watch, sniff, verify, triage, reseal, police, and send continuity-bearing TBZ objects across local and cross-host lanes. v0.6.15: hardened verify_fork default path — tibet-drop + cbor2 now required deps (Codex P520 finding)."
+version = "0.6.16"
+description = "Continuity daemon and sealed handoff tool — watch, sniff, verify, triage, reseal, police, and send continuity-bearing TBZ objects across local and cross-host lanes. v0.6.16: sync __version__ with package metadata (was stuck at 0.6.13 in daemon startup log)."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
